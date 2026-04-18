@@ -27,13 +27,30 @@ PLMB_GRP = {'water_pipes','drain_sewer','water_heater','toilet','faucet_sink','s
 ELEC_GRP = {'electrical','generator','ev_charger'}
 ALL_EX   = HVAC_GRP | PLMB_GRP | ELEC_GRP | {'gas_utility','air_quality'}
 
-# FIX 2: /tag/ added
-EXCL = ['/truck-wrap','/careers','/join-the-team','/contact','/podcast','/coupons',
-        '/warranty','/about-us','/meet-the','/technicians','/community','/financing',
-        '/solar','/estore','/home-energy','/lancaster-neighbors','/tonawanda-dispatch',
-        '/hamburg-service','/buffalo-service','/buffalo-home-improvement',
-        '/case_study_category','why-choose-us','/walker','/our-community',
-        '/renovation-services','/case-stud','/specials','/tag/']
+# Universal exclusion patterns — works for any website
+EXCL = [
+    # Non-service pages universal to all sites
+    '/about','/about-us','/about-me','/our-story','/who-we-are',
+    '/meet-the','/our-team','/team','/staff','/technicians','/employees',
+    '/careers','/jobs','/join','/join-the-team','/work-for-us','/hiring',
+    '/contact','/contact-us','/get-in-touch','/reach-us','/find-us',
+    '/privacy','/privacy-policy','/terms','/terms-of-service','/disclaimer',
+    '/sitemap','/site-map','/accessibility','/ada',
+    '/cart','/checkout','/account','/login','/register','/my-account',
+    '/tag/','/category/','/author/','/page/','/archive/',
+    '/search','/404','/error','/thank-you','/confirmation','/success',
+    '/podcast','/video','/videos','/webinar','/event','/events',
+    '/press','/media','/news-room','/press-release',
+    '/financing','/payment','/apply','/credit',
+    '/warranty','/guarantee','/returns','/refund',
+    '/affiliate','/partner','/referral','/ambassador',
+    '/coupons','/specials','/deals','/offers','/promotions','/sale',
+    '/community','/forum','/gallery','/portfolio',
+    '/estore','/store','/shop','/product',
+    '/solar','/case-stud','/case_study',
+    # Truck wrap / contest pages (unusual but universal pattern)
+    '/truck-wrap','/contest','/giveaway',
+]
 
 EXPAND = [(r'\bac\b','air conditioning'),(r'\ba/c\b','air conditioning'),
           (r'\bhvac\b','heating cooling air conditioning'),(r'\bfurnace\b','furnace heating'),
@@ -144,7 +161,6 @@ URL_PATTERNS = [
     ('commercial-hvac',                   'Commercial',         'Commercial HVAC'),
     ('buffalo-commercial',                'Commercial',         'Commercial Service'),
     ('maintenance-plans',                 'HVAC General',       'Maintenance Plans'),
-    ('buffalo-ny',                        'Plumbing',           'General Service'),
 ]
 
 BLOG_PATTERNS = [
@@ -263,8 +279,52 @@ def expand(t):
     for p, r in EXPAND: t = re.sub(p, r, t)
     return t
 
-def is_excl(url):
-    return any(p in str(url).lower() for p in EXCL)
+def extract_stop_words(sf_df):
+    """
+    Auto-detect brand name, city names and generic site-wide terms
+    from Title + Meta + H1 frequency across all pages.
+    Words appearing in 20%+ of pages = site-specific noise → stop words.
+    Works for any domain, any city, any brand.
+    """
+    # Common English words to always keep (not stop words even if frequent)
+    KEEP = {'the','and','in','of','for','to','a','an','is','are','we','our',
+            'your','with','at','by','from','or','on','as','it','its','be',
+            'was','has','have','will','can','all','new','best','top','get',
+            'need','help','call','today','now','free','save','local','near',
+            'professional','certified','licensed','expert','quality','service',
+            'services','repair','repairs','installation','maintenance','company',
+            'near','me','ny','llc','inc','co','ltd','corp'}
+    word_page_count = {}
+    total_pages = len(sf_df)
+    for _, row in sf_df.iterrows():
+        title = str(row.get('Title 1', row.get('Page Title','')) or '')
+        meta  = str(row.get('Meta Description 1', row.get('Meta Description','')) or '')
+        h1    = str(row.get('H1-1', row.get('H1','')) or '')
+        combined = f"{title} {meta} {h1}".lower()
+        words = set(re.findall(r'\b[a-z]{3,}\b', combined))
+        for w in words:
+            word_page_count[w] = word_page_count.get(w, 0) + 1
+    threshold = total_pages * 0.20
+    stop = set()
+    for word, count in word_page_count.items():
+        if count >= threshold and word not in KEEP:
+            stop.add(word)
+    # Also extract domain parts from first URL
+    sample_urls = sf_df.apply(lambda r: get_url(r), axis=1).dropna()
+    if len(sample_urls):
+        m = re.search(r'https?://(?:www\.)?([^/]+)', str(sample_urls.iloc[0]))
+        if m:
+            domain_parts = re.split(r'[\.\-]', m.group(1).lower())
+            for p in domain_parts:
+                if len(p) > 2 and p not in KEEP:
+                    stop.add(p)
+    return stop
+
+def is_excl(url, extra_excl=None):
+    """Check exclusion against universal list + Title-based detection."""
+    ul = str(url).lower()
+    all_excl = EXCL + (extra_excl or [])
+    return any(p in ul for p in all_excl)
 
 def get_url(row):
     return str(row.get('Address', row.get('Landing Page', '')))
@@ -349,7 +409,7 @@ def cat_url(url):
     if any(t in p for t in ['kitchen-remodel','kitchen-renov']): c.update({'kitchen','plumbing_general'})
     if 'sprinkler' in p: c.add('sprinkler')
     if any(t in p for t in ['residential-plumbing','emergency-plumber','commercial-plumbing','plumbing-inspection']): c.add('plumbing_general')
-    if p.rstrip('/') in ['/buffalo-ny','/maintenance-plans','/buffalo']: c.update({'plumbing_general','hvac_general','electrical'})
+    if p.rstrip('/') in ['/maintenance-plans']: c.update({'plumbing_general','hvac_general','electrical'})
     for loc in ['cheektowaga','amherst','hamburg','lancaster','west-seneca','orchard-park',
                 'east-aurora','springville','alden','akron','batavia','clarence','depew',
                 'elma','eden','marilla','holland','wales','darien','medina','attica',
@@ -535,40 +595,53 @@ Keywords:
         max_tokens=1200, timeout=45
     )
 
-def claude_theme_subtheme(api_key, kw_url_pairs, biz_desc, status_text, progress_bar, p0, p1):
-    """Assign Theme + Sub-theme for keywords on generic URLs."""
-    batches = [kw_url_pairs[i:i+60] for i in range(0, len(kw_url_pairs), 60)]
+def claude_theme_subtheme(api_key, url_meta_list, biz_desc, status_text, progress_bar, p0, p1):
+    """
+    Assign Theme + Sub-theme using full page metadata (URL + Title + Meta + H1).
+    Works for any industry — business description provides the service context.
+    url_meta_list: list of dicts {url, title, meta, h1}
+    """
+    batches = [url_meta_list[i:i+40] for i in range(0, len(url_meta_list), 40)]
     def make_prompt(batch):
-        items = json.dumps([{"keyword": k, "url": u} for k, u in batch])
-        return f"""You are an SEO strategist. For each keyword + URL pair, assign:
-1. theme: top-level service category
-2. subtheme: specific content topic (what ONE page should cover)
+        items = json.dumps([{
+            "url":   p["url"],
+            "title": p["title"][:120],
+            "meta":  p["meta"][:180],
+            "h1":    p["h1"][:80]
+        } for p in batch])
+        return f"""You are an SEO strategist. For each page, assign Theme and Sub-theme
+based on the URL, Title, Meta Description and H1.
 
-Use these themes only: Furnace / Heating, AC / Cooling, Heat Pump, Water Heater,
-Drain / Sewer, Plumbing, Electrical, Generator, Sump Pump, Air Quality,
-Water Treatment, Backflow, Geothermal, Bathroom / Kitchen, Ventilation,
-EV Charger, Commercial, HVAC General
+Business context: {biz_desc}
 
-Sub-theme should be specific enough to represent ONE page.
-Examples: "Furnace Repair", "AC Tune-up", "Drain Cleaning", "Water Heater Cost Guide"
+Rules:
+1. Theme = top-level service category relevant to this business
+2. Sub-theme = specific topic this ONE page covers (precise enough that
+   it represents exactly one piece of content)
+3. Use Title, Meta and H1 as primary signals — they are more reliable than the URL
+4. If Title/H1 says "Furnace Repair" — Sub-theme is "Furnace Repair" regardless of URL
+5. Be consistent — same type of page should get same Sub-theme across the site
 
-Business: {biz_desc}
-Return ONLY JSON: {{"keyword": {{"theme": "X", "subtheme": "Y"}},...}}
-Pairs: {items}"""
+Return ONLY JSON keyed by URL:
+{{"url": {{"theme": "Theme Name", "subtheme": "Specific Sub-theme"}},...}}
+
+Pages:
+{items}"""
     def parse_result(r, batch):
         out = {}
-        for k, u in batch:
-            if k in r and isinstance(r[k], dict):
-                out[k] = (r[k].get('theme', ''), r[k].get('subtheme', ''))
+        for p in batch:
+            url = p["url"]
+            if url in r and isinstance(r[url], dict):
+                out[url] = (r[url].get('theme',''), r[url].get('subtheme',''))
             else:
-                out[k] = ('', '')
+                out[url] = ('','')
         return out
     return run_batches(
         api_key, batches,
         make_prompt=make_prompt,
         parse_result=parse_result,
-        fallback_fn=lambda b: {k: ('', '') for k, u in b},
-        status_prefix="Claude — theme/sub-theme assignment",
+        fallback_fn=lambda b: {p["url"]: ('','') for p in b},
+        status_prefix="Claude — theme/sub-theme",
         status_text=status_text, progress_bar=progress_bar, p0=p0, p1=p1,
         max_tokens=1500, timeout=50
     )
@@ -612,14 +685,26 @@ Pairs: {json.dumps([{"keyword":k,"blog":s} for k,s in batch])}"""
         max_tokens=800, timeout=40
     )
 
-def claude_match_blogs(api_key, keywords, existing_blogs, status_text, progress_bar, p0, p1):
+def claude_match_blogs(api_key, keywords, existing_blogs, url_df, status_text, progress_bar, p0, p1):
+    """FIX C: Semantically match unmapped informational kws to existing blogs.
+    Uses blog Title + H1 as context — much more accurate than slug alone."""
     batches = [keywords[i:i+80] for i in range(0, len(keywords), 80)]
-    blog_list = json.dumps([b.split('/blog/')[-1].strip('/') for b in existing_blogs[:60]])
+    # Build blog context: slug → title + h1
+    blog_ctx = {}
+    for _, row in url_df.iterrows():
+        url = get_url(row)
+        if url and '/blog/' in url.lower():
+            slug  = url.split('/blog/')[-1].strip('/')
+            title = str(row.get('title_raw', row.get('Title 1','')) or '')
+            h1    = str(row.get('h1_raw', row.get('H1-1','')) or '')
+            blog_ctx[slug] = re.sub(r'\s*[\|\-–].*$','',title).strip() or h1 or slug
+    blog_list = json.dumps([{"slug": s, "topic": t} for s, t in list(blog_ctx.items())[:60]])
     def make_prompt(batch):
-        return f"""SEO analyst. Match each keyword to the best existing blog post slug, or null.
-Only return a slug if the blog CLEARLY covers that keyword (90%+ relevance).
-Available blog slugs: {blog_list}
+        return f"""SEO analyst. Match each keyword to the best existing blog post, or null.
+Only return a slug if the blog CLEARLY covers that keyword topic (90%+ relevance).
+Use the blog topic description to judge relevance — not just the slug.
 Return ONLY JSON: {{"keyword":"slug_or_null",...}}
+Available blogs: {blog_list}
 Keywords: {json.dumps(batch)}"""
     return run_batches(
         api_key, batches,
@@ -664,16 +749,39 @@ Keywords: {json.dumps(kw_list)}"""
 
 # ── PHASE 1: GSC VALIDATION ───────────────────────────────────────────────
 def phase1_gsc(gsc_df, sf_df, weights, status_text, progress_bar):
-    status_text.text("Phase 1: Building URL index...")
+    status_text.text("Phase 1: Extracting site vocabulary from Screaming Frog...")
     progress_bar.progress(3)
-    stop = set()
-    if len(sf_df):
-        m = re.search(r'https?://([^/]+)', str(get_url(sf_df.iloc[0])))
-        if m: stop = set(m.group(1).replace('www.', '').split('.'))
-    url_df = sf_df[~sf_df.apply(lambda r: is_excl(get_url(r)), axis=1)].reset_index(drop=True)
+
+    # Auto-detect stop words from Title + Meta + H1 frequency
+    stop = extract_stop_words(sf_df)
+
+    # Build extra exclusions from page Title content (universal)
+    TITLE_EXCL_SIGNALS = ['about us','meet the','our team','careers','contact us',
+                          'privacy policy','terms of service','404','thank you',
+                          'join our team','work for us','sign in','log in']
+    extra_excl = []
+    for _, row in sf_df.iterrows():
+        title = str(row.get('Title 1', row.get('Page Title','')) or '').lower()
+        if any(sig in title for sig in TITLE_EXCL_SIGNALS):
+            url = get_url(row)
+            if url:
+                slug = re.sub(r'https?://[^/]+', '', url).strip('/')
+                if slug and slug not in extra_excl:
+                    extra_excl.append('/' + slug[:40])
+
+    # Auto-detect homepage slugs from stop words (city names, brand names in URLs)
+    # A page with slug that is entirely stop words = homepage or generic landing page
+    hp_slugs = stop
+
+    url_df = sf_df[~sf_df.apply(lambda r: is_excl(get_url(r), extra_excl), axis=1)].reset_index(drop=True)
     url_df['content'] = url_df.apply(lambda r: build_content(r, weights, stop), axis=1)
     url_df['cats']    = url_df.apply(lambda r: cat_url(get_url(r)), axis=1)
     url_df['ptype']   = url_df.apply(lambda r: 'blog' if '/blog/' in get_url(r).lower() else 'service', axis=1)
+    # Store metadata for Claude Theme/Sub-theme lookup later
+    url_df['title_raw'] = url_df.apply(lambda r: str(r.get('Title 1', r.get('Page Title','')) or ''), axis=1)
+    url_df['meta_raw']  = url_df.apply(lambda r: str(r.get('Meta Description 1', r.get('Meta Description','')) or ''), axis=1)
+    url_df['h1_raw']    = url_df.apply(lambda r: str(r.get('H1-1', r.get('H1','')) or ''), axis=1)
+
     content_map = {get_url(r).lower().strip(): url_df.at[i, 'content'] for i, r in url_df.iterrows()}
     gsc_df['kl'] = gsc_df['Query'].str.lower().str.strip()
     dedup = {}
@@ -707,20 +815,24 @@ def phase1_gsc(gsc_df, sf_df, weights, status_text, progress_bar):
                           'Impressions': d['imps'], 'Position': pos_val, 'CTR': d['ctr'],
                           'Content Score': score, 'Mapping Status': status})
     progress_bar.progress(22)
-    return pd.DataFrame(validated), url_df, dedup, stop
+    return pd.DataFrame(validated), url_df, dedup, stop, hp_slugs
 
 # ── PHASE 2: KEYWORD MAPPING ──────────────────────────────────────────────
 def phase2_map(sem_df, url_df, gsc_dedup, gsc_val_df, weights, threshold,
-               your_col, intent_map, status_text, progress_bar):
+               your_col, intent_map, hp_slugs, status_text, progress_bar):
     status_text.text("Phase 2: Building TF-IDF models...")
     progress_bar.progress(24)
     svc_df  = url_df[url_df['ptype'] == 'service'].reset_index(drop=True)
     blog_df = url_df[url_df['ptype'] == 'blog'].reset_index(drop=True)
+    # Auto-detect homepage URLs — slugs made entirely of stop words are generic landing pages
     hp_urls = set()
     for _, r in url_df.iterrows():
         u = get_url(r)
         slug = re.sub(r'https?://[^/]+', '', u).strip('/')
-        if slug in ('', 'buffalo', 'buffalo-ny', 'buffalo-ny/'): hp_urls.add(u.lower().strip())
+        slug_words = set(re.split(r'[/\-_]', slug.lower())) - {''}
+        # Homepage if slug is empty OR all slug words are stop/city/brand words
+        if not slug_words or slug_words.issubset(hp_slugs | {''}):
+            hp_urls.add(u.lower().strip())
     gsc_status = dict(zip(gsc_val_df['Query'].str.lower().str.strip(), gsc_val_df['Mapping Status']))
     keywords = sem_df['Keyword'].fillna('').tolist()
     volumes  = sem_df['Volume'].fillna(0).tolist()
@@ -834,7 +946,7 @@ def phase4_relevance_blogs(mapped, url_df, api_key, biz_desc, excl_str, status_t
     blog_semantic  = {}
     if unmapped_info and existing_blogs:
         top_info = sorted(unmapped_info, key=lambda k: next((r['Volume'] for r in mapped if r['Keyword'] == k), 0), reverse=True)[:400]
-        blog_semantic = claude_match_blogs(api_key, top_info, existing_blogs, status_text, progress_bar, 81, 85)
+        blog_semantic = claude_match_blogs(api_key, top_info, existing_blogs, url_df, status_text, progress_bar, 81, 85)
     # Business relevance
     low_scored = [r['Keyword'] for r in mapped if not r['Landing Page'] or r['Final Score'] < 0.15]
     confirmed  = {r['Keyword']: 'RELEVANT' for r in mapped if r['Landing Page'] and r['Final Score'] >= 0.15}
@@ -859,67 +971,81 @@ def phase4_relevance_blogs(mapped, url_df, api_key, biz_desc, excl_str, status_t
     return all_rel, mapped
 
 # ── PHASE 5: THEME + SUB-THEME ASSIGNMENT ─────────────────────────────────
-def phase5_themes(mapped, api_key, biz_desc, status_text, progress_bar):
-    status_text.text("Phase 5: Assigning Theme and Sub-theme...")
+def phase5_themes(mapped, url_df, api_key, biz_desc, status_text, progress_bar):
+    """
+    Assign Theme + Sub-theme to every keyword.
+    For mapped keywords: derived from the page's Title + Meta + H1 via Claude.
+    For unmapped keywords: derived from keyword terms (updated later by clustering).
+    Claude uses business description as industry context — works for any industry.
+    """
+    status_text.text("Phase 5: Assigning Theme and Sub-theme from page metadata...")
     progress_bar.progress(93)
-    # Build URL → (theme, subtheme) cache
-    url_cache = {}
-    generic_url_kw_pairs = []  # needs Claude
-    for r in mapped:
-        url = r['Landing Page']
+
+    # Build URL → metadata lookup from Screaming Frog data
+    url_meta = {}
+    for _, row in url_df.iterrows():
+        url   = get_url(row)
         if not url: continue
-        if url in url_cache: continue
-        theme, sub = url_to_theme_subtheme(url)
-        if theme:
-            url_cache[url] = (theme, sub)
+        title = str(row.get('title_raw', row.get('Title 1', row.get('Page Title',''))  or '') or '')
+        meta  = str(row.get('meta_raw',  row.get('Meta Description 1', row.get('Meta Description','')) or '') or '')
+        h1    = str(row.get('h1_raw',    row.get('H1-1', row.get('H1','')) or '') or '')
+        # Clean brand suffixes from title for cleaner signal
+        title_clean = re.sub(r'\s*[\|\-–]\s*.{0,40}$', '', title).strip()
+        url_meta[url] = {
+            "url":   re.sub(r'https?://[^/]+', '', url)[:60],
+            "title": title_clean[:120],
+            "meta":  meta[:180],
+            "h1":    h1[:80],
+        }
+
+    # Get all unique URLs that keywords map to
+    mapped_urls = list({r['Landing Page'] for r in mapped if r['Landing Page']})
+
+    # Send ALL mapped URLs to Claude with full metadata
+    # Claude uses Title + Meta + H1 as primary signals — not URL slug
+    url_meta_for_claude = []
+    for url in mapped_urls:
+        if url in url_meta:
+            url_meta_for_claude.append(url_meta[url])
         else:
-            url_cache[url] = None  # needs Claude
-    # Collect keyword+URL pairs for generic URLs
-    generic_kws_seen = set()
-    for r in mapped:
-        url = r['Landing Page']
-        if url and url_cache.get(url) is None:
-            k = r['Keyword']
-            if k not in generic_kws_seen:
-                generic_kw_url_pairs = []
-                generic_kws_seen.add(k)
-    # Get unique generic URL+keyword pairs (sample top 5 per generic URL)
-    generic_url_samples = {}
-    for r in mapped:
-        url = r['Landing Page']
-        if url and url_cache.get(url) is None:
-            if url not in generic_url_samples:
-                generic_url_samples[url] = []
-            if len(generic_url_samples[url]) < 5:
-                generic_url_samples[url].append(r['Keyword'])
-    # Build pairs for Claude
-    pairs_for_claude = []
-    for url, kws in generic_url_samples.items():
-        for kw in kws:
-            pairs_for_claude.append((kw, url.replace('https://cellinoplumbing.com','').replace('https://','')[:60]))
-    theme_map = {}
-    if pairs_for_claude:
-        raw = claude_theme_subtheme(api_key, pairs_for_claude, biz_desc, status_text, progress_bar, 93, 96)
-        theme_map = raw  # keyword → (theme, subtheme)
-        # Propagate URL-level theme to all keywords on same URL
-        for url in generic_url_samples:
-            representative = generic_url_samples[url][0]
-            if representative in theme_map:
-                url_cache[url] = theme_map[representative]
-    # Assign theme + subtheme to every keyword
+            # URL not in Screaming Frog (GSC fallback URL) — use slug only
+            url_meta_for_claude.append({
+                "url":   re.sub(r'https?://[^/]+', '', url)[:60],
+                "title": "", "meta": "", "h1": ""
+            })
+
+    # Call Claude with full metadata for all URLs
+    url_theme_map = {}  # url_slug → (theme, subtheme)
+    if url_meta_for_claude:
+        raw = claude_theme_subtheme(
+            api_key, url_meta_for_claude, biz_desc,
+            status_text, progress_bar, 93, 96
+        )
+        # raw is keyed by url slug — map back to full URL
+        for url in mapped_urls:
+            slug = re.sub(r'https?://[^/]+', '', url)[:60]
+            if slug in raw:
+                url_theme_map[url] = raw[slug]
+            else:
+                url_theme_map[url] = ('', '')
+
+    # Apply theme + subtheme to every mapped keyword row
     for r in mapped:
         url = r['Landing Page']
         kw  = r['Keyword']
         if url:
-            ts = url_cache.get(url)
-            if ts:
+            ts = url_theme_map.get(url)
+            if ts and ts[0]:
                 r['Theme'], r['Sub-theme'] = ts
-            elif kw in theme_map:
-                r['Theme'], r['Sub-theme'] = theme_map[kw]
             else:
-                r['Theme'] = classify_topic(kw); r['Sub-theme'] = ''
+                # Fallback to classify_topic if Claude returned nothing
+                r['Theme']     = classify_topic(kw)
+                r['Sub-theme'] = ''
         else:
-            r['Theme'] = classify_topic(kw); r['Sub-theme'] = ''
+            # Unmapped — theme from keyword, sub-theme filled by clustering later
+            r['Theme']     = classify_topic(kw)
+            r['Sub-theme'] = ''
+
     progress_bar.progress(96)
     return mapped
 
@@ -938,6 +1064,52 @@ def phase6_cluster(mapped, rel_map, api_key, status_text, progress_bar):
         clusters += claude_cluster(api_key, unmapped_info, "blog post", status_text, progress_bar, 97, 98)
     if unmapped_trans:
         clusters += claude_cluster(api_key, unmapped_trans, "service page", status_text, progress_bar, 98, 99)
+
+    # ── Write cluster names back to every keyword row as Sub-theme ────────
+    # Build lookup: keyword → (cluster_name, entity)
+    cluster_kw_lookup = {}
+    for cl in clusters:
+        cname  = cl.get('cluster_name', '')
+        entity = cl.get('entity', '')
+        theme  = entity if entity else ''
+        for kw2 in [cl.get('primary_keyword','')] + cl.get('secondary_keywords',[]):
+            if kw2:
+                cluster_kw_lookup[kw2.lower()] = (theme, cname)
+
+    # Fallback sub-theme from keyword terms for unclustered unmapped keywords
+    def keyword_fallback_subtheme(kw):
+        """Generate a readable sub-theme from the keyword itself."""
+        kl = kw.lower()
+        # Service type signals
+        if any(t in kl for t in ['repair','fix','fixing','broken','not working']): svc = 'Repair'
+        elif any(t in kl for t in ['install','installation','replace','replacement','new']): svc = 'Installation'
+        elif any(t in kl for t in ['maintenance','tune','service','clean','flush','inspect']): svc = 'Maintenance'
+        elif any(t in kl for t in ['cost','price','how much','pricing','average']): svc = 'Cost Guide'
+        elif any(t in kl for t in ['smell','odor','stink']): svc = 'Odor Solutions'
+        elif any(t in kl for t in ['clog','clogged','unclog','blockage']): svc = 'Clog Solutions'
+        elif any(t in kl for t in ['emergency','urgent','24 hour','same day']): svc = 'Emergency Service'
+        elif any(t in kl for t in ['near me','local','in buffalo','western ny']): svc = 'Local Service'
+        elif any(t in kl for t in ['what is','how does','how to','why','what are']): svc = 'Guide'
+        else: svc = 'Service'
+        # Entity
+        topic = classify_topic(kw)
+        short = topic.split('/')[0].strip() if '/' in topic else topic
+        return f"{short} {svc}" if short != 'Other' else svc
+
+    # Apply cluster sub-theme (or fallback) to all unmapped keyword rows
+    for r in mapped:
+        if not r['Landing Page']:
+            kl = r['Keyword'].lower()
+            if kl in cluster_kw_lookup:
+                theme_cl, sub_cl = cluster_kw_lookup[kl]
+                if not r.get('Theme') or r.get('Theme') == 'Other':
+                    r['Theme'] = theme_cl or classify_topic(r['Keyword'])
+                r['Sub-theme'] = sub_cl
+            else:
+                # Fallback for keywords outside the volume cap
+                if not r.get('Sub-theme'):
+                    r['Sub-theme'] = keyword_fallback_subtheme(r['Keyword'])
+
     # Build URL-based clusters (mapped keywords grouped by URL + intent)
     url_groups = {}
     for r in mapped:
@@ -1217,7 +1389,7 @@ if sem_file:
             kwc = st.selectbox("Keyword", cols, index=cols.index('Keyword') if 'Keyword' in cols else 0, key='skc')
             vc  = st.selectbox("Volume",  cols, index=cols.index('Volume')  if 'Volume'  in cols else 1, key='svc')
             your_col = st.selectbox("Your domain position column", cols, index=0,
-                                    help="Column showing YOUR site's position e.g. cellinoplumbing.com", key='sdc')
+                                    help="Column showing YOUR site's position e.g. yourdomain.com", key='sdc')
         sem_df = raw.rename(columns={kwc:'Keyword', vc:'Volume'})
         sem_df = sem_df[sem_df['Keyword'].notna()].reset_index(drop=True)
         st.markdown(f'<div class="info-box">✅ Loaded <strong>{len(sem_df):,}</strong> keywords</div>', unsafe_allow_html=True)
@@ -1251,7 +1423,7 @@ if st.button("🚀 Run Full Analysis", disabled=bool(issues), use_container_widt
 
     try:
         # Phase 1
-        gsc_val, url_df, gsc_dedup, stop = phase1_gsc(gsc_df, sf_df, weights, status_text, progress_bar)
+        gsc_val, url_df, gsc_dedup, stop, hp_slugs = phase1_gsc(gsc_df, sf_df, weights, status_text, progress_bar)
 
         # Phase 3: Intent classification (before mapping so mapping uses correct intent)
         all_kws = sem_df['Keyword'].fillna('').tolist()
@@ -1259,14 +1431,14 @@ if st.button("🚀 Run Full Analysis", disabled=bool(issues), use_container_widt
 
         # Phase 2
         mapped = phase2_map(sem_df, url_df, gsc_dedup, gsc_val, weights, threshold,
-                            your_col, intent_map, status_text, progress_bar)
+                            your_col, intent_map, hp_slugs, status_text, progress_bar)
 
         # Phase 4
         rel_map, mapped = phase4_relevance_blogs(mapped, url_df, api_key, biz_desc, excl_str,
                                                   status_text, progress_bar)
 
         # Phase 5: Theme + Sub-theme
-        mapped = phase5_themes(mapped, api_key, biz_desc, status_text, progress_bar)
+        mapped = phase5_themes(mapped, url_df, api_key, biz_desc, status_text, progress_bar)
 
         # Phase 6: Clustering
         clusters, url_clusters = phase6_cluster(mapped, rel_map, api_key, status_text, progress_bar)
