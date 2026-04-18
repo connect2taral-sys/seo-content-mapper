@@ -596,11 +596,23 @@ with col2:
             kw_cols    = list(kw_df_raw.columns)
 
             with st.expander("Map keyword columns"):
-                kw_col  = st.selectbox("Keyword column",       kw_cols, index=kw_cols.index('Keyword')       if 'Keyword'       in kw_cols else 0, key='kwc')
-                vol_col = st.selectbox("Search Volume column", kw_cols, index=kw_cols.index('Volume')        if 'Volume'        in kw_cols else (kw_cols.index('Search Volume') if 'Search Volume' in kw_cols else 0), key='vc')
+                kw_col  = st.selectbox("Keyword column", kw_cols,
+                    index=kw_cols.index('Keyword') if 'Keyword' in kw_cols else 0, key='kwc')
+                vol_options = ['(none — no volume column)'] + kw_cols
+                vol_default = (kw_cols.index('Volume') + 1) if 'Volume' in kw_cols else \
+                              (kw_cols.index('Search Volume') + 1) if 'Search Volume' in kw_cols else 0
+                vol_col_sel = st.selectbox("Search Volume column (optional)", vol_options,
+                    index=vol_default, key='vc')
+                vol_col = None if vol_col_sel == '(none — no volume column)' else vol_col_sel
 
             st.markdown("**URLs sheet**")
-            url_sheet  = st.selectbox("Select URL index sheet", kw_sheets, index=1 if len(kw_sheets) > 1 else 0, key='url_sheet')
+            # Default to 'Unique URLs' sheet if it exists, else second sheet
+            url_sheet_default = 0
+            if 'Unique URLs' in kw_sheets:
+                url_sheet_default = kw_sheets.index('Unique URLs')
+            elif len(kw_sheets) > 1:
+                url_sheet_default = 1
+            url_sheet  = st.selectbox("Select URL index sheet", kw_sheets, index=url_sheet_default, key='url_sheet')
             url_df_raw = kw_xl[url_sheet]
             url_cols   = list(url_df_raw.columns)
 
@@ -636,9 +648,13 @@ if st.button("🚀 Run Mapping", disabled=not can_run, use_container_width=True,
             gsc_map[kw_l] = best['Landing Page']
 
         # Build keyword list + volume map
-        kw_df_clean = kw_df_raw.rename(columns={kw_col:'Keyword', vol_col:'Volume'})
-        keywords    = kw_df_clean['Keyword'].fillna('').tolist()
-        vol_map     = dict(zip(kw_df_clean['Keyword'].str.lower(), kw_df_clean['Volume'].fillna(0)))
+        kw_df_clean = kw_df_raw.rename(columns={kw_col: 'Keyword'})
+        if vol_col:
+            kw_df_clean = kw_df_clean.rename(columns={vol_col: 'Volume'})
+        else:
+            kw_df_clean['Volume'] = 0
+        keywords = kw_df_clean['Keyword'].fillna('').tolist()
+        vol_map  = dict(zip(kw_df_clean['Keyword'].str.lower(), kw_df_clean['Volume'].fillna(0)))
 
         # Build URL df
         url_df_clean = url_df_raw.rename(columns={
