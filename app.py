@@ -344,29 +344,207 @@ def build_content(row, weights, stop=None):
     sw, tw, hw, mw = weights
     return f"{slug} " * sw + f"{title} " * tw + f"{h1} " * hw + meta * mw
 
-def classify_topic(kw):
-    ke = expand(kw.lower())
-    TMAP = {
-        'Furnace / Heating': ['furnace heating','furnace','boiler heating','boiler','radiant heat','steam heat','forced air'],
-        'AC / Cooling':      ['air conditioning','cooling','central air','mini split ductless','ductless','evaporator coil','refrigerant'],
-        'Heat Pump':         ['heat pump heating cooling'],
-        'Water Heater':      ['water heater hot water','water heater','tankless water heater','hot water'],
-        'Drain / Sewer':     ['drain sewer','sewer','clog','unclog','jetting','hydrojet','rooter','sewage','septic'],
-        'Plumbing':          ['plumb','pipe','leak','repiping','water line','water main','burst pipe'],
-        'Electrical':        ['electric','electrician','panel','wiring','outlet','gfci outlet electrical','circuit','lighting','surge'],
-        'Generator':         ['generator backup power'],
-        'Sump Pump':         ['sump pump basement'],
-        'Air Quality':       ['air quality','dehumidif','humidif','air purif','uv air sanitizer','indoor air'],
-        'Water Treatment':   ['soft water','hard water','water treatment','water softener'],
-        'Backflow':          ['backflow prevention'],
-        'Geothermal':        ['geothermal'],
-        'Bathroom / Kitchen':['bathroom','kitchen','toilet','shower','faucet','sink','tub','garbage disposal'],
-        'Ventilation':       ['ventilation','hrv','erv','air handler'],
-        'EV Charger':        ['ev charger','electric vehicle charg','charging station'],
-        'Commercial':        ['commercial'],
-    }
-    for t, terms in TMAP.items():
-        if any(x in ke for x in terms): return t
+def classify_theme(kw):
+    """
+    Assign Theme from the keyword itself — not from any URL.
+    Order matters: most specific checks first to prevent wrong matches.
+    """
+    kl = kw.lower().strip()
+    ke = expand(kl)  # expanded version for abbreviations
+
+    # ── Water Heater (check before general plumbing/heating) ─────────────
+    if any(t in kl for t in ['water heater','hot water heater','tankless water heater',
+                               'tankless heater','water heater','hot water tank',
+                               'water heater repair','water heater install',
+                               'water heater cost','water heater replace',
+                               'water heater maintenance','water heater service',
+                               'no hot water','hot water not','water not heating',
+                               'leaking water heater','water heater leak']):
+        return 'Water Heater'
+    if 'tankless' in kl and any(t in kl for t in ['water','heat','hot']):
+        return 'Water Heater'
+
+    # ── Gas (check before plumbing) ───────────────────────────────────────
+    if any(t in kl for t in ['gas leak','gas line','gas pipe','gas service',
+                               'gas detector','natural gas leak','propane line',
+                               'carbon monoxide','co detector','gas shut off']):
+        return 'Gas Line'
+
+    # ── Drain / Sewer (check before plumbing) ────────────────────────────
+    # ── Drain / Sewer ─────────────────────────────────────────────────────
+    if any(t in kl for t in ['drain clean','drain clog','drain repair','drain service',
+                               'drain snake','drain block','clog drain','unclog',
+                               'hydro jet','hydrojet','rooter service','sewage',
+                               'sewer clean','sewer repair','sewer line','sewer service',
+                               'drain smell','drain odor','sewer smell','sewer clog',
+                               'clogged drain','slow drain','blocked drain','drain back',
+                               'main line','storm drain','floor drain','exterior drain',
+                               'interior drain','sewer camera','drain camera',
+                               'sink clog','sink drain','sink keeps','toilet clog',
+                               'tub drain','shower clog','basement drain',
+                               'keeps clogging','keeps draining',
+                               'drainage system','drain system','drain pipe',
+                               'sewer pipe','sewer main']):
+        return 'Drain / Sewer'
+    if 'drain' in kl and not any(t in kl for t in ['drain field','drainage system','brain drain']):
+        return 'Drain / Sewer'
+    if 'sewer' in kl:
+        return 'Drain / Sewer'
+
+    # ── Water Treatment ───────────────────────────────────────────────────
+    if any(t in kl for t in ['water filter','water filtration','water softener',
+                               'water purif','water treatment','soft water','hard water',
+                               'water quality','reverse osmosis','iron filter']):
+        return 'Water Treatment'
+
+    # ── Sump Pump (check before general plumbing) ────────────────────────
+    if 'sump pump' in kl or 'sump-pump' in kl:
+        return 'Sump Pump'
+
+    # ── Backflow ─────────────────────────────────────────────────────────
+    if 'backflow' in kl:
+        return 'Backflow'
+
+    # ── Sprinkler ────────────────────────────────────────────────────────
+    if 'sprinkler' in kl:
+        return 'Sprinkler'
+
+    # ── Furnace / Heating ─────────────────────────────────────────────────
+    if any(t in kl for t in ['furnace','boiler','steam boiler','steam heat',
+                               'radiant heat','radiant heating','forced air',
+                               'gas furnace','electric furnace','oil furnace',
+                               'furnace repair','furnace install','furnace tune',
+                               'furnace maintenance','furnace service','furnace clean',
+                               'furnace filter','furnace not working','furnace cost',
+                               'boiler repair','boiler service','boiler install',
+                               'boiler maintenance','boiler tune','boiler cost',
+                               'heat exchanger','flue','chimney liner']):
+        return 'Furnace / Heating'
+    # "heater" alone (not water heater) → furnace/heating
+    if re.search(r'\bheater\b', kl) and 'water' not in kl and 'pool' not in kl:
+        return 'Furnace / Heating'
+    # "heating" alone with no other service context → furnace/heating
+    if re.search(r'\bheating\b', kl) and not any(t in kl for t in [
+            'water','pool','floor','radiant floor','geothermal',
+            'heating and cooling','heating cooling','hvac']):
+        return 'Furnace / Heating'
+
+    # ── Heat Pump ────────────────────────────────────────────────────────
+    if 'heat pump' in kl:
+        return 'Heat Pump'
+
+    # ── AC / Cooling (check after heat pump) ─────────────────────────────
+    if any(t in kl for t in ['air condition','air conditioner','central air',
+                               'ac repair','ac install','ac service','ac tune',
+                               'ac unit','ac filter','ac replacement','ac cost',
+                               'a/c repair','a/c install','a/c service',
+                               'evaporator coil','refrigerant','freon',
+                               'ac blowing','ac not cooling','ac not working',
+                               'ac blows','air conditioner repair','air conditioner install',
+                               'cooling system','central cooling','ac warm','warm air ac',
+                               'air conditioner blowing','air conditioner not']):
+        return 'AC / Cooling'
+    if re.search(r'\bac\b', kl) and any(t in kl for t in ['repair','install','service','tune','cost','replace']):
+        return 'AC / Cooling'
+    if re.search(r'\bcooling\b', kl) and 'heating and cooling' not in kl:
+        return 'AC / Cooling'
+
+    # ── Ductless / Mini Split ─────────────────────────────────────────────
+    if any(t in kl for t in ['mini split','ductless','mini-split']):
+        return 'Ductless Mini Split'
+
+    # ── HVAC General (heating AND cooling together, or generic hvac) ──────
+    if any(t in kl for t in ['hvac','heating and cooling','heating & cooling',
+                               'heat and cool','heating cooling',
+                               'ventilation contractor','ventilation service',
+                               'ventilation company','ventilation install',
+                               'ventilation repair','ventilation near me']):
+        return 'HVAC General'
+
+    # ── Electrical ────────────────────────────────────────────────────────
+    # ── Electrical (before ventilation to catch chandelier/lighting) ────
+    if any(t in kl for t in ['electrician','electrical panel','electric panel',
+                               'breaker','circuit breaker','breaker box',
+                               'wiring','rewiring','electrical wiring',
+                               'outlet','gfci','light fixture','lighting install',
+                               'lighting repair','outdoor lighting','indoor lighting',
+                               'surge protect','electrical inspect','electrical troubl',
+                               'electrical repair','electrical install','electrical service',
+                               'electrical work','electrical contractor','electric repair',
+                               'electrical short','electrical main','electrical permit',
+                               'local electrician','licensed electrician','home electrical',
+                               'residential electrical','commercial electrical',
+                               'chandelier','pendant light','ceiling fan install',
+                               'smoke detector','carbon monoxide detector install',
+                               'short circuit','electrical short','power outage',
+                               'power surge','tripped breaker','tripping breaker']):
+        return 'Electrical'
+    # "electric" alone (not electric vehicle, not electric water heater etc.)
+    if re.search(r'\belectric\b', kl) and not any(t in kl for t in [
+            'water heater','vehicle','car','furnace','boiler','heat pump']):
+        return 'Electrical'
+
+    # ── Generator ────────────────────────────────────────────────────────
+    if any(t in kl for t in ['generator','standby power','backup power','whole home generator',
+                               'home generator','standby generator']):
+        return 'Generator'
+
+    # ── EV Charger ───────────────────────────────────────────────────────
+    if any(t in kl for t in ['ev charger','ev charging','electric vehicle charg',
+                               'electric car charg','charging station','home charging station',
+                               'car charging']):
+        return 'EV Charger'
+
+    # ── Air Quality ───────────────────────────────────────────────────────
+    if any(t in kl for t in ['air quality','air purif','air cleaner','air scrubber',
+                               'dehumidif','humidif','indoor air','uv sanitizer',
+                               'uv air','air filter service','whole home dehumid']):
+        return 'Air Quality'
+
+    # ── Geothermal ───────────────────────────────────────────────────────
+    if 'geothermal' in kl:
+        return 'Geothermal'
+
+    # ── Ventilation / Duct (actual ventilation, not heating/cooling) ──────
+    # Check BEFORE lighting to avoid air handler stealing chandelier
+    if any(t in kl for t in ['duct cleaning','air duct','ductwork','duct work',
+                               'hrv','erv','heat recovery','energy recovery',
+                               'ventilation system','mechanical ventilation',
+                               'air handler','air handling']):
+        return 'Ventilation / Duct'
+    # drainage system → Drain / Sewer (not Ventilation)
+    if 'drainage system' in kl or 'drain system' in kl:
+        return 'Drain / Sewer'
+
+    # ── Toilet ────────────────────────────────────────────────────────────
+    if 'toilet' in kl:
+        return 'Bathroom / Kitchen'
+
+    # ── Bathroom / Kitchen fixtures ────────────────────────────────────────
+    if any(t in kl for t in ['faucet','garbage disposal','kitchen sink','disposal unit',
+                               'shower','bathtub','bath tub','shower drain',
+                               'bathroom remodel','kitchen remodel','bathroom renov',
+                               'kitchen renov','bathroom plumb','kitchen plumb',
+                               'vanity','bathtub install','shower install']):
+        return 'Bathroom / Kitchen'
+
+    # ── General Plumbing (after all specific checks) ──────────────────────
+    if any(t in kl for t in ['plumbing','plumber','pipe install','pipe repair',
+                               'pipe replac','pipe clean','water line','water main',
+                               'water pipe','burst pipe','pipe leak','slab leak',
+                               'repiping','frozen pipe','main water','water pressure',
+                               'water service','water shut off','plumbing inspect',
+                               'emergency plumb','24 hour plumb','residential plumb',
+                               'commercial plumb','plumbing company','plumbing service',
+                               'local plumb','licensed plumb','plumbing contractor',
+                               'plumbing repair','plumbing install']):
+        return 'Plumbing'
+
+    # ── Commercial (if still unclassified) ───────────────────────────────
+    if any(t in kl for t in ['commercial service','commercial repair','commercial hvac',
+                               'commercial plumbing','commercial electrical']):
+        return 'Commercial'
+
     return 'Other'
 
 def make_fill(c): return PatternFill(start_color=c, end_color=c, fill_type='solid')
@@ -970,80 +1148,113 @@ def phase4_relevance_blogs(mapped, url_df, api_key, biz_desc, excl_str, status_t
     progress_bar.progress(92)
     return all_rel, mapped
 
-# ── PHASE 5: THEME + SUB-THEME ASSIGNMENT ─────────────────────────────────
+# ── PHASE 5: THEME + SUB-THEME — FULLY AI DRIVEN ─────────────────────────
 def phase5_themes(mapped, url_df, api_key, biz_desc, status_text, progress_bar):
     """
-    Assign Theme + Sub-theme to every keyword.
-    For mapped keywords: derived from the page's Title + Meta + H1 via Claude.
-    For unmapped keywords: derived from keyword terms (updated later by clustering).
-    Claude uses business description as industry context — works for any industry.
+    Claude assigns BOTH Theme and Sub-theme for every keyword.
+    Source of truth: the keyword text + business description.
+    Rule-based classify_theme() is used only as a pre-sorter for batching
+    so related keywords go in the same batch — giving Claude context for
+    consistent sub-theme naming. Claude makes the final decision.
     """
-    status_text.text("Phase 5: Assigning Theme and Sub-theme from page metadata...")
+    status_text.text("Phase 5: AI-powered theme and sub-theme assignment...")
     progress_bar.progress(93)
 
-    # Build URL → metadata lookup from Screaming Frog data
-    url_meta = {}
-    for _, row in url_df.iterrows():
-        url   = get_url(row)
-        if not url: continue
-        title = str(row.get('title_raw', row.get('Title 1', row.get('Page Title',''))  or '') or '')
-        meta  = str(row.get('meta_raw',  row.get('Meta Description 1', row.get('Meta Description','')) or '') or '')
-        h1    = str(row.get('h1_raw',    row.get('H1-1', row.get('H1','')) or '') or '')
-        # Clean brand suffixes from title for cleaner signal
-        title_clean = re.sub(r'\s*[\|\-–]\s*.{0,40}$', '', title).strip()
-        url_meta[url] = {
-            "url":   re.sub(r'https?://[^/]+', '', url)[:60],
-            "title": title_clean[:120],
-            "meta":  meta[:180],
-            "h1":    h1[:80],
-        }
-
-    # Get all unique URLs that keywords map to
-    mapped_urls = list({r['Landing Page'] for r in mapped if r['Landing Page']})
-
-    # Send ALL mapped URLs to Claude with full metadata
-    # Claude uses Title + Meta + H1 as primary signals — not URL slug
-    url_meta_for_claude = []
-    for url in mapped_urls:
-        if url in url_meta:
-            url_meta_for_claude.append(url_meta[url])
-        else:
-            # URL not in Screaming Frog (GSC fallback URL) — use slug only
-            url_meta_for_claude.append({
-                "url":   re.sub(r'https?://[^/]+', '', url)[:60],
-                "title": "", "meta": "", "h1": ""
-            })
-
-    # Call Claude with full metadata for all URLs
-    url_theme_map = {}  # url_slug → (theme, subtheme)
-    if url_meta_for_claude:
-        raw = claude_theme_subtheme(
-            api_key, url_meta_for_claude, biz_desc,
-            status_text, progress_bar, 93, 96
-        )
-        # raw is keyed by url slug — map back to full URL
-        for url in mapped_urls:
-            slug = re.sub(r'https?://[^/]+', '', url)[:60]
-            if slug in raw:
-                url_theme_map[url] = raw[slug]
-            else:
-                url_theme_map[url] = ('', '')
-
-    # Apply theme + subtheme to every mapped keyword row
+    # Pre-sort keywords by approximate topic so each Claude batch
+    # sees related keywords — produces more consistent sub-theme names
+    from collections import defaultdict
+    buckets = defaultdict(list)
     for r in mapped:
-        url = r['Landing Page']
-        kw  = r['Keyword']
-        if url:
-            ts = url_theme_map.get(url)
-            if ts and ts[0]:
-                r['Theme'], r['Sub-theme'] = ts
-            else:
-                # Fallback to classify_topic if Claude returned nothing
-                r['Theme']     = classify_topic(kw)
-                r['Sub-theme'] = ''
+        bucket = classify_theme(r['Keyword'])  # used for SORTING only, not final answer
+        buckets[bucket].append({
+            'keyword': r['Keyword'],
+            'intent':  r['Intent'],
+            'volume':  r['Volume'],
+        })
+
+    theme_subtheme_map = {}  # keyword → (theme, subtheme)
+    all_buckets = list(buckets.items())
+    total_buckets = len(all_buckets)
+
+    for bi, (bucket_name, items) in enumerate(all_buckets):
+        batches = [items[i:i+150] for i in range(0, len(items), 150)]
+        for ba_idx, batch in enumerate(batches):
+            pct = min(93 + int(((bi * len(batches) + ba_idx) /
+                                max(sum(len(items) for _,items in all_buckets)/150, 1)) * 3), 95)
+            progress_bar.progress(pct)
+            status_text.text(
+                f"Phase 5: Assigning themes ({bi+1}/{total_buckets} — {bucket_name})...")
+
+            kw_list = [{"keyword": x['keyword'], "intent": x['intent']} for x in batch]
+
+            prompt = f"""You are an expert SEO strategist. For each keyword assign:
+1. "theme"    — the top-level service category this keyword belongs to
+2. "subtheme" — the specific content topic (precise enough for ONE page/post)
+
+Business context: {biz_desc}
+
+THEME must reflect what SERVICE the keyword is about — derived entirely from
+the keyword text, not from any URL or page.
+
+SUBTHEME rules:
+- Specific enough that it represents exactly ONE page or blog post
+- Keywords with identical searcher intent get the SAME subtheme
+- Max 4 words, title case
+- Never use generic labels like "Service", "Repair" alone — always include the entity
+  Good: "Furnace Repair", "AC Tune-up Cost", "Drain Odor Solutions", "Water Heater Lifespan"
+  Bad:  "Heating", "Service", "Repair", "HVAC"
+
+Examples:
+  "furnace repair near me"              → {{"theme":"Furnace / Heating","subtheme":"Furnace Repair"}}
+  "how long does a furnace last"        → {{"theme":"Furnace / Heating","subtheme":"Furnace Lifespan"}}
+  "furnace tune up cost"                → {{"theme":"Furnace / Heating","subtheme":"Furnace Tune-up Cost"}}
+  "water filter installation near me"   → {{"theme":"Water Treatment","subtheme":"Water Filtration Installation"}}
+  "breaker repair service"              → {{"theme":"Electrical","subtheme":"Circuit Breaker Repair"}}
+  "heater repair services near me"      → {{"theme":"Furnace / Heating","subtheme":"Furnace Repair"}}
+  "ac blows warm air"                   → {{"theme":"AC / Cooling","subtheme":"AC Troubleshooting"}}
+  "sewer cleaning greenlawn"            → {{"theme":"Drain / Sewer","subtheme":"Sewer Cleaning"}}
+  "chandelier installation near me"     → {{"theme":"Electrical","subtheme":"Light Fixture Installation"}}
+  "heating and cooling near me"         → {{"theme":"HVAC General","subtheme":"HVAC Service"}}
+  "hvac near me"                        → {{"theme":"HVAC General","subtheme":"HVAC Service"}}
+  "heater service near me"              → {{"theme":"Furnace / Heating","subtheme":"Furnace Service"}}
+
+Return ONLY valid JSON: {{"keyword": {{"theme": "X", "subtheme": "Y"}}, ...}}
+
+Keywords:
+{json.dumps(kw_list)}"""
+
+            for attempt in range(3):
+                try:
+                    result = call_claude(api_key, prompt, 2000, 50)
+                    if isinstance(result, dict):
+                        for item in batch:
+                            kw = item['keyword']
+                            val = result.get(kw, {})
+                            if isinstance(val, dict):
+                                theme_subtheme_map[kw] = (
+                                    val.get('theme', classify_theme(kw)),
+                                    val.get('subtheme', '')
+                                )
+                            else:
+                                theme_subtheme_map[kw] = (classify_theme(kw), '')
+                    break
+                except Exception:
+                    if attempt < 2:
+                        time.sleep(2)
+                    else:
+                        # Fallback: rule-based theme, blank subtheme
+                        for item in batch:
+                            theme_subtheme_map[item['keyword']] = (
+                                classify_theme(item['keyword']), '')
+            time.sleep(0.1)
+
+    # Apply to every keyword row
+    for r in mapped:
+        kw = r['Keyword']
+        if kw in theme_subtheme_map:
+            r['Theme'], r['Sub-theme'] = theme_subtheme_map[kw]
         else:
-            # Unmapped — theme from keyword, sub-theme filled by clustering later
-            r['Theme']     = classify_topic(kw)
+            r['Theme']     = classify_theme(kw)
             r['Sub-theme'] = ''
 
     progress_bar.progress(96)
@@ -1092,7 +1303,7 @@ def phase6_cluster(mapped, rel_map, api_key, status_text, progress_bar):
         elif any(t in kl for t in ['what is','how does','how to','why','what are']): svc = 'Guide'
         else: svc = 'Service'
         # Entity
-        topic = classify_topic(kw)
+        topic = classify_theme(kw)
         short = topic.split('/')[0].strip() if '/' in topic else topic
         return f"{short} {svc}" if short != 'Other' else svc
 
@@ -1103,7 +1314,7 @@ def phase6_cluster(mapped, rel_map, api_key, status_text, progress_bar):
             if kl in cluster_kw_lookup:
                 theme_cl, sub_cl = cluster_kw_lookup[kl]
                 if not r.get('Theme') or r.get('Theme') == 'Other':
-                    r['Theme'] = theme_cl or classify_topic(r['Keyword'])
+                    r['Theme'] = theme_cl or classify_theme(r['Keyword'])
                 r['Sub-theme'] = sub_cl
             else:
                 # Fallback for keywords outside the volume cap
