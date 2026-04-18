@@ -297,7 +297,7 @@ def call_claude(api_key, prompt, max_tokens=2000):
 
 def claude_relevance(api_key, keywords, biz_desc, excl_str, status_text, progress_bar, p0, p1):
     out = {}
-    batches = [keywords[i:i+50] for i in range(0,len(keywords),50)]
+    batches = [keywords[i:i+100] for i in range(0,len(keywords),100)]
     for bi,batch in enumerate(batches):
         progress_bar.progress(min(p0+int((bi/len(batches))*(p1-p0)),p1-1))
         status_text.text(f"Claude API — relevance check: batch {bi+1}/{len(batches)}...")
@@ -313,13 +313,13 @@ Keywords: {json.dumps(batch)}"""
                 if attempt<2: time.sleep(3)
                 else:
                     for k in batch: out[k]='BORDERLINE'
-        time.sleep(0.3)
+        time.sleep(0.1)
     return out
 
 def claude_validate_blogs(api_key, kw_blog_pairs, status_text, progress_bar, p0, p1):
     """Validate whether a keyword actually matches the blog it was mapped to."""
     out = {}
-    batches = [kw_blog_pairs[i:i+30] for i in range(0,len(kw_blog_pairs),30)]
+    batches = [kw_blog_pairs[i:i+50] for i in range(0,len(kw_blog_pairs),50)]
     for bi,batch in enumerate(batches):
         progress_bar.progress(min(p0+int((bi/len(batches))*(p1-p0)),p1-1))
         status_text.text(f"Claude API — blog validation: batch {bi+1}/{len(batches)}...")
@@ -335,14 +335,14 @@ Pairs: {pairs_str}"""
                 if attempt<2: time.sleep(3)
                 else:
                     for k,s in batch: out[k]='YES'
-        time.sleep(0.3)
+        time.sleep(0.1)
     return out
 
 def claude_match_blogs(api_key, keywords_info, existing_blogs, status_text, progress_bar, p0, p1):
     """FIX C: Semantically match unmapped informational kws to existing blogs."""
     out = {}
     blog_list = json.dumps([b.replace('https://cellinoplumbing.com','') for b in existing_blogs[:60]])
-    batches = [keywords_info[i:i+40] for i in range(0,len(keywords_info),40)]
+    batches = [keywords_info[i:i+80] for i in range(0,len(keywords_info),80)]
     for bi,batch in enumerate(batches):
         progress_bar.progress(min(p0+int((bi/len(batches))*(p1-p0)),p1-1))
         status_text.text(f"Claude API — blog semantic matching: batch {bi+1}/{len(batches)}...")
@@ -357,13 +357,13 @@ Keywords: {json.dumps(batch)}"""
                 if attempt<2: time.sleep(3)
                 else:
                     for k in batch: out[k]=None
-        time.sleep(0.3)
+        time.sleep(0.1)
     return out
 
 def claude_cluster(api_key, keywords_with_vol, content_type, status_text, progress_bar, p0, p1):
     """Semantic clustering of unmapped keywords into topic clusters."""
     out = []
-    batches = [keywords_with_vol[i:i+80] for i in range(0,len(keywords_with_vol),80)]
+    batches = [keywords_with_vol[i:i+120] for i in range(0,len(keywords_with_vol),120)]
     for bi,batch in enumerate(batches):
         progress_bar.progress(min(p0+int((bi/len(batches))*(p1-p0)),p1-1))
         status_text.text(f"Claude API — semantic clustering ({content_type}): batch {bi+1}/{len(batches)}...")
@@ -391,7 +391,7 @@ Keywords to cluster:
                 break
             except:
                 if attempt<2: time.sleep(5)
-        time.sleep(0.5)
+        time.sleep(0.2)
     return out
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -612,13 +612,16 @@ def phase3_claude(mapped, url_df, api_key, biz_desc, excl_str, status_text, prog
 
     blog_semantic = {}
     if unmapped_info and existing_blogs:
-        status_text.text(f"Phase 3b: Semantically matching {len(unmapped_info)} informational keywords to existing blogs...")
-        blog_semantic = claude_match_blogs(api_key, unmapped_info, existing_blogs, status_text, progress_bar, 78, 84)
+        # Only run semantic matching on top 400 by volume to keep runtime manageable
+        unmapped_info_top = sorted(unmapped_info, key=lambda k: next((r['Volume'] for r in mapped if r['Keyword']==k),0), reverse=True)[:400]
+        status_text.text(f"Phase 3b: Semantically matching top {len(unmapped_info_top)} informational keywords to existing blogs...")
+        blog_semantic = claude_match_blogs(api_key, unmapped_info_top, existing_blogs, status_text, progress_bar, 78, 84)
 
-    # Business relevance for low-scored or unmapped keywords
+    # Business relevance — only truly unmapped + score below 0.15 (not 0.20)
+    # Keywords with score 0.15-0.20 are acceptable matches, don't need Claude check
     low_scored = [r['Keyword'] for r in mapped
-                  if r['Final Score'] < 0.20 or not r['Landing Page']]
-    confirmed  = {r['Keyword']:'RELEVANT' for r in mapped if r['Final Score'] >= 0.20 and r['Landing Page']}
+                  if not r['Landing Page'] or r['Final Score'] < 0.15]
+    confirmed  = {r['Keyword']:'RELEVANT' for r in mapped if r['Landing Page'] and r['Final Score'] >= 0.15}
 
     rel_map = {}
     if low_scored:
@@ -664,12 +667,15 @@ def phase4_cluster(mapped, rel_map, api_key, status_text, progress_bar):
     progress_bar.progress(94)
 
     # Unmapped relevant keywords split by intent
-    unmapped_info  = [(r['Keyword'],r['Volume']) for r in mapped
+    unmapped_info_all = [(r['Keyword'],r['Volume']) for r in mapped
                       if not r['Landing Page'] and rel_map.get(r['Keyword'],'') in ('RELEVANT','BORDERLINE')
                       and r['Intent']=='Informational']
-    unmapped_trans = [(r['Keyword'],r['Volume']) for r in mapped
+    unmapped_info = sorted(unmapped_info_all, key=lambda x:-x[1])[:1000]
+    # Limit to top 1500 transactional by volume — beyond that, low-volume long tail
+    unmapped_trans_all = [(r['Keyword'],r['Volume']) for r in mapped
                       if not r['Landing Page'] and rel_map.get(r['Keyword'],'') in ('RELEVANT','BORDERLINE')
                       and r['Intent']=='Transactional']
+    unmapped_trans = sorted(unmapped_trans_all, key=lambda x:-x[1])[:1500]
 
     clusters = []
     if unmapped_info:
