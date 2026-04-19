@@ -1148,6 +1148,92 @@ def phase4_relevance_blogs(mapped, url_df, api_key, biz_desc, excl_str, status_t
     progress_bar.progress(92)
     return all_rel, mapped
 
+# ── HELPERS ──────────────────────────────────────────────────────────────
+def subtheme_fallback(kw, theme):
+    """Guaranteed sub-theme from keyword terms. Never returns blank."""
+    kl = kw.lower()
+    entity = theme.split('/')[0].strip() if '/' in theme else theme
+    if entity in ('Other', ''): entity = 'General'
+    # Job-to-be-done signals
+    if any(t in kl for t in ['cost','price','how much','pricing','average cost','worth']): job = 'Cost Guide'
+    elif any(t in kl for t in ['not working','not heating','not cooling','not draining',
+                                 'won\'t','doesn\'t','blowing warm','blows warm','blowing hot',
+                                 'blows hot','no heat','no hot water','no cool','no cold',
+                                 'keeps','tripping','flickering','smell','noise','leak',
+                                 'dripping','gurgling','humming','clicking','buzzing']): job = 'Troubleshooting'
+    elif any(t in kl for t in ['how to','diy','myself','my own','at home']): job = 'DIY Guide'
+    elif any(t in kl for t in ['what is','how does','how long','lifespan','last','life expectancy',
+                                 'types of','difference','vs ','versus','benefits','signs','causes']): job = 'Educational Guide'
+    elif any(t in kl for t in ['install','installation','replace','replacement','new ']): job = 'Installation'
+    elif any(t in kl for t in ['maintenance','tune','tune-up','tune up','service','clean','flush','inspect']): job = 'Maintenance'
+    elif any(t in kl for t in ['emergency','urgent','24 hour','24/7','same day']): job = 'Emergency Service'
+    elif any(t in kl for t in ['repair','fix','fixing','broken']): job = 'Repair'
+    else: job = 'Service'
+    return f"{entity} {job}"
+
+def build_content_groups(mapped):
+    """
+    Assign Content Group ID to every keyword row.
+    Logic: Theme + Normalised Sub-theme + URL (or gap) = one content group.
+    Same combination = same page. Primary = highest volume in group.
+    Format: AC-001, FH-002, DS-003 etc.
+    """
+    # Build theme initials map
+    INITIALS = {
+        'AC / Cooling': 'AC', 'Furnace / Heating': 'FH', 'Heat Pump': 'HP',
+        'Water Heater': 'WH', 'Drain / Sewer': 'DS', 'Plumbing': 'PL',
+        'Electrical': 'EL', 'Generator': 'GN', 'Sump Pump': 'SP',
+        'Air Quality': 'AQ', 'Water Treatment': 'WT', 'Backflow': 'BF',
+        'Geothermal': 'GE', 'Bathroom / Kitchen': 'BK', 'Ventilation / Duct': 'VD',
+        'EV Charger': 'EV', 'Commercial': 'CM', 'HVAC General': 'HV',
+        'Gas Line': 'GL', 'Ductless Mini Split': 'DM', 'Sprinkler': 'SK',
+        'Other': 'OT',
+    }
+
+    # Group keywords by (theme, subtheme, url_key)
+    # url_key: actual URL for mapped kws, 'GAP-{intent}' for unmapped
+    groups = {}
+    for r in mapped:
+        theme = r.get('Theme', 'Other') or 'Other'
+        sub   = r.get('Sub-theme', '') or subtheme_fallback(r['Keyword'], theme)
+        url   = r.get('Landing Page', '')
+        if url:
+            url_key = url.lower().strip()
+        else:
+            url_key = f"GAP-{r.get('Intent','Transactional')}"
+
+        key = (theme, sub, url_key)
+        if key not in groups:
+            groups[key] = []
+        groups[key].append(r)
+
+    # Sort groups by total volume descending, assign IDs
+    sorted_groups = sorted(groups.items(),
+                           key=lambda x: sum(r['Volume'] for r in x[1]),
+                           reverse=True)
+
+    # Track ID counter per theme initial
+    id_counter = {}
+    cg_map = {}  # keyword → (cg_id, is_primary)
+
+    for (theme, sub, url_key), rows in sorted_groups:
+        initial = INITIALS.get(theme, 'XX')
+        id_counter[initial] = id_counter.get(initial, 0) + 1
+        cg_id = f"{initial}-{id_counter[initial]:03d}"
+
+        # Primary = highest volume in group
+        rows_sorted = sorted(rows, key=lambda r: -r.get('Volume', 0))
+        for i, r in enumerate(rows_sorted):
+            cg_map[r['Keyword']] = (cg_id, 'Primary' if i == 0 else 'Secondary')
+
+    # Apply back to mapped
+    for r in mapped:
+        cg_id, role = cg_map.get(r['Keyword'], ('', ''))
+        r['Content Group'] = cg_id
+        r['KW Role']       = role
+
+    return mapped
+
 # ── PHASE 5: THEME + SUB-THEME — FULLY AI DRIVEN ─────────────────────────
 def phase5_themes(mapped, url_df, api_key, biz_desc, status_text, progress_bar):
     """
@@ -1536,8 +1622,9 @@ with st.sidebar:
     st.header("⚙️ Settings"); st.markdown("---")
     threshold = st.slider("Match Score Threshold", 0.10, 0.40, 0.15, 0.01)
     st.markdown("**Content Weights**")
-    sw=st.slider("URL Slug",1,8,5); tw=st.slider("Page Title",1,6,3)
-    hw=st.slider("H1 Heading",1,4,2); mw=st.slider("Meta Description",1,3,1)
+    st.caption("Page Title, H1 and Meta are primary signals. URL Slug is secondary.")
+    tw=st.slider("Page Title",1,8,5); hw=st.slider("H1 Heading",1,6,4)
+    mw=st.slider("Meta Description",1,5,3); sw=st.slider("URL Slug",1,4,2)
     weights = (sw,tw,hw,mw)
     st.markdown("---")
     st.markdown("**Score Guide**")
@@ -1653,6 +1740,59 @@ if st.button("🚀 Run Full Analysis", disabled=bool(issues), use_container_widt
 
         # Phase 6: Clustering
         clusters, url_clusters = phase6_cluster(mapped, rel_map, api_key, status_text, progress_bar)
+
+        # ── GUARANTEED ZERO BLANK SUB-THEMES ─────────────────────────────
+        # After all Claude phases, sweep every row and fill any remaining blanks.
+        # This runs on mapped list which feeds ALL tabs — no tab can have blanks.
+        def guaranteed_subtheme(kw, theme, intent):
+            """Generate sub-theme from keyword terms when Claude missed it."""
+            kl = kw.lower()
+            # Service type from keyword signals
+            if any(t in kl for t in ['not working','not heating','not cooling','not turning',
+                                      'not draining','blowing warm','blowing cold','wont start',
+                                      "won't start","doesn't work",'broken','failed']):
+                svc = 'Troubleshooting'
+            elif any(t in kl for t in ['cost','price','how much','pricing','average cost',
+                                        'worth it','expensive','affordable','cheap']):
+                svc = 'Cost Guide'
+            elif any(t in kl for t in ['repair','fix','fixing','broken','service call']):
+                svc = 'Repair'
+            elif any(t in kl for t in ['install','installation','replace','replacement',
+                                        'new','put in','set up']):
+                svc = 'Installation'
+            elif any(t in kl for t in ['maintenance','tune up','tune-up','service',
+                                        'clean','flush','inspect','annual','seasonal']):
+                svc = 'Maintenance'
+            elif any(t in kl for t in ['emergency','urgent','24 hour','24/7','same day',
+                                        'after hours']):
+                svc = 'Emergency Service'
+            elif any(t in kl for t in ['near me','local','in my area','close to me']):
+                svc = 'Local Service'
+            elif intent == 'Informational':
+                if any(t in kl for t in ['how to','how do','how does']):   svc = 'How-to Guide'
+                elif any(t in kl for t in ['what is','what are','what does']): svc = 'Explainer'
+                elif any(t in kl for t in ['why','cause','reason']):        svc = 'Problem Guide'
+                elif any(t in kl for t in ['vs','versus','difference','compare']): svc = 'Comparison'
+                elif any(t in kl for t in ['signs','symptoms','detect']):   svc = 'Warning Signs'
+                elif any(t in kl for t in ['tips','advice','guide','checklist']): svc = 'Tips Guide'
+                else:                                                         svc = 'Guide'
+            else:
+                svc = 'Service'
+            # Entity prefix from theme
+            entity = theme.split('/')[0].strip() if '/' in theme else theme
+            if entity and entity not in ('Other', ''):
+                return f"{entity} {svc}"
+            return svc
+
+        blanks_filled = 0
+        for r in mapped:
+            if not r.get('Sub-theme') or str(r.get('Sub-theme','')).strip() == '':
+                r['Sub-theme'] = guaranteed_subtheme(
+                    r['Keyword'], r.get('Theme', classify_theme(r['Keyword'])), r['Intent'])
+                blanks_filled += 1
+            # Also ensure Theme is never blank
+            if not r.get('Theme') or str(r.get('Theme','')).strip() == '':
+                r['Theme'] = classify_theme(r['Keyword'])
 
         progress_bar.progress(99)
         status_text.text("Building Excel output...")
