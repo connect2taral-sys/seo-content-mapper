@@ -245,6 +245,17 @@ INFO_STRONG = [
     r'\blifespan\b', r'\bhow long\b', r'\bwhat size\b', r'\bwhat type\b',
     r'\bhow often\b', r'\bhow many\b', r'\bguide\b', r'\bexplain\b',
     r'\bunderstand\b', r'\blearn\b', r'\bmeaning\b', r'\bdefinition\b',
+    # How/what/why patterns not caught by ^ anchors
+    r'\bhow it works\b', r'\bhow they work\b', r'\bwhat it does\b',
+    r'\bhow it works\b', r'\bwhat are the\b', r'\bwhat is a\b',
+    r'\bwhat is the\b', r'\bwhere does\b', r'\bwhere do\b', r'\bwhere is\b', r'\bwhere are\b',
+    r'\bhow do you\b', r'\bhow do i\b', r'\bhow can i\b',
+    r'\bexplained\b', r'\bexplanation\b', r'\boverview\b',
+    r'\b\w+ uses\b', r'\b\w+ function\b', r'\bfunctions of\b',
+    r'\bpurpose of\b', r'\bhow does a\b', r'\bhow does it\b',
+    r'\bwhat does a\b', r'\bwhat does it\b',
+    r'\bcome from\b', r'\bwork\?', r'\bworks\?',
+    r'\btypes of\b', r'\bkinds of\b',
 ]
 
 # Strong transactional signals — override Semrush
@@ -270,6 +281,51 @@ def classify_intent_rules(kw):
     # Check strong transactional
     for p in TRANS_STRONG:
         if re.search(p, kl):
+            return 'Transactional'
+    # Location + service keyword = Transactional hiring intent
+    # e.g. "sump pump rochester", "plumber in chicago", "drain cleaning buffalo ny"
+    _SVC = {'plumber','plumbing','electrician','hvac','furnace','boiler','heater',
+            'drain','sewer','pump','repair','install','service','contractor',
+            'technician','company','fix','clean','replace','maintenance',
+            'cooling','heating','electrical','generator','backflow','ac'}
+    if any(w in kl for w in _SVC):
+        words = kl.split()
+        _US_ST = {'al','ak','az','ar','ca','co','ct','de','fl','ga','hi','id',
+                  'il','in','ia','ks','ky','la','me','md','ma','mi','mn','ms',
+                  'mo','mt','ne','nv','nh','nj','nm','ny','nc','nd','oh','ok',
+                  'or','pa','ri','sc','sd','tn','tx','ut','vt','va','wa','wv',
+                  'wi','wy','dc'}
+        # Ends with state abbreviation → Transactional
+        if len(words) >= 2 and words[-1] in _US_ST:
+            return 'Transactional'
+        # Contains explicit "in [city]" or "near [city]" where city ≠ generic word
+        _GENERIC = {'me','area','home','town','city','state','local','zone',
+                    'region','district','county','neighborhood','vicinity'}
+        m = re.search(r'\b(?:in|near)\s+([a-z]{4,})$', kl)
+        if m and m.group(1) not in _GENERIC:
+            return 'Transactional'
+        # Service + bare city name at end (no preposition, no state abbrev)
+        # e.g. "sump pump rochester", "hvac repair greenlawn"
+        # City = last word that is alphabetic, 4+ chars, not a common English word
+        _NOT_CITY = {'repair','service','services','install','clean','replace',
+                     'maintain','system','works','working','function','uses',
+                     'explained','definition','meaning','overview','guide','tips',
+                     'cost','price','water','pump','tank','pipe','line','unit',
+                     'part','problems','issues','call','help','need','want',
+                     'best','good','local','near','area','home','house','company',
+                     'contractor','professional','licensed','certified','expert',
+                     'emergency','residential','commercial','quality','test',
+                     'inspection','cleaning','replacement','installation','pump',
+                     'heater','furnace','boiler','drain','sewer','hvac','power',
+                     'electric','electrical','generator','cooling','heating'}
+        filtered = [w for w in words if w not in
+                    {'a','an','the','in','on','at','for','to','of','and','or',
+                     'my','your','our','near','best','good','local','great','free'}]
+        if (len(filtered) >= 2 and
+                filtered[-1] not in _NOT_CITY and
+                filtered[-1] not in _GENERIC and
+                len(filtered[-1]) >= 4 and
+                filtered[-1].isalpha()):
             return 'Transactional'
     return 'Ambiguous'
 
@@ -1618,7 +1674,12 @@ def extract_location(kw):
         cwords = candidate.split()
         # Remove trailing state abbreviation for rejection check
         core = ' '.join(cwords[:-1]) if (len(cwords) > 1 and cwords[-1] in US_STATES) else candidate
-        if not any(w in NOT_LOC for w in core.split()):
+        # Expanded reject list — include service/common words that slip through
+        _REJECT_P1 = NOT_LOC | {'come','from','does','pump','tank','pipe','line',
+                                  'unit','also','this','that','what','when','will',
+                                  'with','them','they','then','more','most','some',
+                                  'here','have','been','both','only','sump','come'}
+        if not any(w in _REJECT_P1 for w in core.split()):
             return candidate
 
     # ── Pattern 2: "[service] [city words] [state abbrev]" ───────────────
@@ -1639,34 +1700,66 @@ def extract_location(kw):
             if not any(w in NOT_LOC for w in city_words):
                 return candidate
 
-    # ── Pattern 3: "[service] [city words]" at end — no state abbrev ─────
+    # ── Pattern 3: "[service] [city name]" — city at tail, no state abbrev ──
     # e.g. "hvac repair rochester", "sewer cleaning greenlawn"
-    # City must be at end, after at least one service word at start
+    # STRICT: only fire when the tail word is very unlikely to be a common word
+    # Most false positives (system, works, function, uses, explained, water)
+    # are common English dictionary words — reject them with comprehensive blocklist
     has_service_start = any(w in SERVICE_WORDS for w in words[:2])
     if has_service_start and len(words) >= 3:
+        # Large blocklist of common English words that are NOT place names
+        COMMON_ENGLISH = {
+            # Descriptive/functional words
+            'system','systems','works','working','function','functions',
+            'uses','used','using','explained','explanation','definition',
+            'meaning','purpose','overview','basics','basics','guide',
+            'tips','advice','information','info','details','facts',
+            'types','kind','kinds','form','forms','style','styles',
+            'cost','costs','price','prices','pricing','rates','rate',
+            'size','sizes','capacity','power','pressure','flow',
+            'water','heat','cool','warm','cold','hot','fire',
+            'issues','issue','problems','problem','call','calls',
+            'work','help','need','wants','want','gets','make',
+            'best','good','great','safe','safe','right','wrong',
+            'long','last','life','time','test','check','know',
+            'install','repair','clean','replace','maintain','check',
+            'pump','tank','pipe','line','unit','part','parts',
+            'code','codes','permit','permits','license','licensed',
+            'reviews','review','ratings','rated','near','around',
+            'professional','certified','trained','qualified','expert',
+            'old','new','used','average','normal','standard',
+            'high','low','full','small','large','heavy','light',
+            'electric','electrical','gas','water','solar','smart',
+            # 'city','town','village' handled separately as CITY_SUFFIXES in Pattern 3
+            # Question/informational words
+            'what','when','where','which','that','this','these',
+            'from','come','goes','goes','does','have','make',
+        }
         tail = []
+        # Words allowed at end of city name (transparent — don't break traversal)
+        CITY_SUFFIXES = {'city','town','village','heights','park','beach','springs',
+                         'falls','creek','lake','hill','hills','grove','point','bay'}
+        # Common words that appear AS PART OF city names (transparent both directions)
+        CITY_PARTS = {'new','old','san','los','las','las','el','le','la','du','des',
+                      'west','east','north','south','upper','lower','port','fort',
+                      'mount','palm','long','grand','great','little','saint','ste',
+                      'isle','bay','cape','lake','rio','del','von','van'}
         for w in reversed(words):
-            if w in SERVICE_WORDS or w in NOT_LOC or len(w) < 3:
+            if w in CITY_SUFFIXES or w in CITY_PARTS:
+                tail.insert(0, w)  # include but keep going
+                continue
+            if w in SERVICE_WORDS or w in NOT_LOC or w in COMMON_ENGLISH:
                 break
-            if w.isalpha():
+            if len(w) >= 3 and w.isalpha():
                 tail.insert(0, w)
             else:
                 break
-        if tail and len(' '.join(tail)) >= 4:
-            # Reject obvious non-locations
-            NOT_PLACE = {
-                'temperature','normal','environment','conditioner',
-                'conditioning','installation','replacement','maintenance',
-                'inspection','detection','protection','solutions',
-                'problems','issues','quality','systems','units',
-                'panels','filters','coils','cleaning','treatment',
-                'testing','experts','specialists','cost','price',
-                'pricing','costs','prices','estimate','weather',
-                'climate','season','seasonal','degree','setting',
-                'settings','level','levels','rating','rated',
-            }
+        if tail:
             candidate = ' '.join(tail)
-            if candidate not in NOT_PLACE and not any(w in NOT_PLACE for w in tail):
+            # Must have at least one non-suffix, non-city-part word to be a real location
+            # (e.g. 'york' in 'new york city' — 'new' is CITY_PARTS, 'city' is CITY_SUFFIXES)
+            non_structural = [w for w in tail if w not in CITY_SUFFIXES and w not in CITY_PARTS]
+            if non_structural and not any(w in COMMON_ENGLISH for w in non_structural):
                 return candidate
 
     return ''
