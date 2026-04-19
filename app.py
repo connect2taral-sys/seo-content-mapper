@@ -1445,33 +1445,79 @@ THEME_CODES = {
 }
 
 # Words that are NEVER location names
-NON_LOC = {
-    'repair','repairs','service','services','install','installation','replace','replacement',
-    'maintenance','cleaning','clean','cleaner','company','companies','contractor','contractors',
-    'professional','professionals','emergency','urgent','licensed','certified','local','near',
-    'best','top','cheap','affordable','residential','commercial','industrial','cost','price',
-    'prices','pricing','estimate','estimates','quote','quotes','free','same','day','hour',
-    'hours','week','month','annual','seasonal','indoor','outdoor','home','house','building',
-    'business','office','apartment','condo','drain','sewer','plumb','plumber','plumbing',
-    'hvac','heat','heating','cool','cooling','electric','electrical','water','heater',
-    'furnace','boiler','pump','pipe','pipes','gas','line','lines','system','systems','unit',
-    'units','duct','ducts','filter','filters','coil','coils','valve','valves','tank','tanks',
-    'panel','panels','breaker','outlet','outlets','wiring','wire','generator','generators',
-    'sump','backflow','toilet','sink','faucet','shower','tub','bathroom','kitchen','disposal',
-    'garbage','detector','carbon','monoxide','surge','protect','inspection','inspect','that',
-    'with','from','into','onto','your','their','area','areas','type','types','brand','brands',
-    'model','models','review','reviews','size','sized','large','small','existing','current',
-    'modern','standard','basic','advanced','complete','full','whole','entire','find','hire',
-    'call','schedule','book','need','want','looking','search','how','what','why','when',
-    'does','which','that','this','these','those','such','intitle','site','blog','near',
-}
-
-def extract_location(kw, rare_words):
-    """Detect specific location name in keyword. Returns location string or empty string."""
-    kl = kw.lower()
-    words = re.findall(r'\b[a-z]{4,}\b', kl)
-    loc_words = [w for w in words if w in rare_words and w not in NON_LOC]
-    return ' '.join(loc_words) if loc_words else ''
+def extract_location(kw):
+    """
+    Detect if a keyword contains a specific geographic location name.
+    
+    Requires geographic context — must appear after "in", "near", or at the
+    end of the keyword after a service term. Generic words like "temperature",
+    "normal", "best" are NEVER locations regardless of frequency.
+    
+    Returns the location name string, or empty string if none found.
+    """
+    kl = kw.lower().strip()
+    
+    # Pattern 1: explicit "in [place]" or "near [place]"
+    m = re.search(r'\b(?:in|near|for)\s+([a-z][a-z\s]{2,20})$', kl)
+    if m:
+        candidate = m.group(1).strip()
+        # Reject if candidate is a service/common word
+        if not any(sw in candidate for sw in [
+            'me','area','my','the','your','our','home','house',
+            'local','area','city','town','state','country']):
+            return candidate
+    
+    # Pattern 2: "[service] [location]" — location at end after service word
+    # Only match known geographic-style words (multi-word city names or proper nouns)
+    # Look for patterns like "sewer cleaning greenlawn" or "drain service buffalo ny"
+    SERVICE_WORDS = {
+        'repair','repairs','service','services','install','installation',
+        'cleaning','clean','company','contractor','plumber','electrician',
+        'technician','maintenance','replacement','emergency','near','local',
+    }
+    words = kl.split()
+    # Check if last 1-2 words look like a location (after stripping service words)
+    if len(words) >= 3:
+        # Get the last word(s) that are not service/common words
+        tail_words = []
+        for w in reversed(words):
+            if w in SERVICE_WORDS or w in {
+                'the','a','an','and','or','of','for','to','me',
+                'my','near','best','top','good','great','cheap',
+                'affordable','professional','licensed','certified',
+                'residential','commercial','industrial','home','house',
+            }:
+                break
+            if len(w) >= 4 and w.isalpha():
+                tail_words.insert(0, w)
+            else:
+                break
+        if tail_words:
+            candidate = ' '.join(tail_words)
+            # Must be at least 4 chars and the keyword must start with a service term
+            has_service_start = any(kl.startswith(sw) or f' {sw} ' in kl 
+                                    for sw in SERVICE_WORDS)
+            if has_service_start and len(candidate) >= 4:
+                # Final check: reject obvious non-locations
+                NON_PLACE = {
+                    'temperature','normal','environment','conditioner',
+                    'conditioning','installation','replacement','maintenance',
+                    'inspection','detection','protection','solutions',
+                    'problems','issues','repair','service','company',
+                    'contractor','professional','emergency','affordable',
+                    'residential','commercial','industrial','quality',
+                    'systems','units','panels','filters','coils',
+                    'cleaning','treatment','testing','pumping',
+                    'experts','specialists','technicians','plumbers',
+                    'electricians','companies','contractors','services',
+                    'cost','price','pricing','costs','prices','estimate',
+                    'weather','climate','season','seasonal','winter','summer',
+                    'spring','fall','cold','warm','heat','cool','degree',
+                    'setting','settings','level','levels','rating','rated',
+                }
+                if candidate not in NON_PLACE:
+                    return candidate
+    return ''
 
 
 def normalise_subthemes(api_key, subthemes, biz_desc, status_text, progress_bar):
@@ -1526,19 +1572,9 @@ def assign_content_groups(mapped, api_key, biz_desc, status_text, progress_bar):
     for r in mapped:
         r['Sub-theme'] = canon_map.get(r.get('Sub-theme',''), r.get('Sub-theme',''))
 
-    # Step 2: Build word frequency to detect rare (location) words
-    all_words = Counter()
-    total_kws = len(mapped)
+    # Step 2: Tag each keyword with its location using pattern-based detection
     for r in mapped:
-        for w in re.findall(r'\b[a-z]{4,}\b', r['Keyword'].lower()):
-            all_words[w] += 1
-    rare_threshold = max(2, int(total_kws * 0.04))
-    rare_words = {w for w, cnt in all_words.items()
-                  if cnt <= rare_threshold and w not in NON_LOC}
-
-    # Step 3: Tag each keyword with its location
-    for r in mapped:
-        r['_loc'] = extract_location(r['Keyword'], rare_words)
+        r['_loc'] = extract_location(r['Keyword'])
 
     # Step 4: Build groups — location keywords keyed by their specific location
     groups = {}
@@ -1623,9 +1659,12 @@ def get_group_action(r, rel):
     if url:
         return 'Page exists — optimise', 'Optimise existing service page for this keyword'
 
-    # Gap actions — use GROUP-LEVEL content type, not individual keyword intent
+    # Gap actions
+    # Location group: transactional + has real location → location service page
+    # Blog group: informational majority → blog post
+    # Service group: transactional majority → service page
     if rel in ('RELEVANT', 'BORDERLINE'):
-        if is_loc:
+        if is_loc and gtype == 'Service page':
             return 'Business relevant gap', 'Create new location service page'
         elif gtype == 'Blog post':
             return 'Business relevant gap', 'Create new blog post'
