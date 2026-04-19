@@ -83,15 +83,15 @@ URL_PATTERNS = [
     ('ac-install',                        'AC / Cooling',       'AC Installation'),
     ('ac-tune',                           'AC / Cooling',       'AC Tune-up'),
     ('68-ac',                             'AC / Cooling',       'AC Tune-up'),
-    ('buffalo-ac',                        'AC / Cooling',       'AC Service'),
-    ('buffalo-repair',                    'AC / Cooling',       'AC Repair'),
+    ('ac-repair',                          'AC / Cooling',       'AC Repair'),
+    ('ac-service',                         'AC / Cooling',       'AC Service'),
     ('air-conditioning',                  'AC / Cooling',       'Air Conditioning'),
     ('heat-pump-repair',                  'Heat Pump',          'Heat Pump Repair'),
     ('heat-pump-install',                 'Heat Pump',          'Heat Pump Installation'),
     ('heat-pump-maintenance',             'Heat Pump',          'Heat Pump Maintenance'),
     ('heat-pump-services',                'Heat Pump',          'Heat Pump Service'),
     ('heat-pump',                         'Heat Pump',          'Heat Pump Service'),
-    ('mitsubishi',                        'Heat Pump',          'Mitsubishi Heat Pump'),
+    ('mini-split',                         'Heat Pump',          'Mini Split Service'),
     ('furnace-repair',                    'Furnace / Heating',  'Furnace Repair'),
     ('furnace-install',                   'Furnace / Heating',  'Furnace Installation'),
     ('furnace-tune',                      'Furnace / Heating',  'Furnace Tune-up'),
@@ -157,9 +157,9 @@ URL_PATTERNS = [
     ('duct-cleaning',                     'HVAC General',       'Duct Cleaning'),
     ('air-duct',                          'HVAC General',       'Duct Cleaning'),
     ('air-handler',                       'HVAC General',       'Air Handler'),
-    ('trane',                             'HVAC General',       'Trane Systems'),
+    ('hvac-service',                       'HVAC General',       'HVAC Service'),
     ('commercial-hvac',                   'Commercial',         'Commercial HVAC'),
-    ('buffalo-commercial',                'Commercial',         'Commercial Service'),
+    ('commercial-service',                 'Commercial',         'Commercial Service'),
     ('maintenance-plans',                 'HVAC General',       'Maintenance Plans'),
 ]
 
@@ -199,7 +199,7 @@ BLOG_PATTERNS = [
     ('indoor-air',           'Air Quality',        'Indoor Air Quality Guide'),
     ('air-quality',          'Air Quality',        'Air Quality Guide'),
     ('discolored-water',     'Water Heater',       'Water Heater Troubleshooting'),
-    ('cummins',              'Generator',          'Generator Guide'),
+    ('backup-power',         'Generator',          'Generator Guide'),
     ('plumbing',             'Plumbing',           'Plumbing Tips & Guides'),
 ]
 
@@ -249,7 +249,7 @@ INFO_STRONG = [
 
 # Strong transactional signals — override Semrush
 TRANS_STRONG = [
-    r'\bnear me\b', r'\bin buffalo\b', r'\bin western ny\b',
+    r'\bnear me\b', r'\bin my area\b', r'\bclose to me\b',
     r'\bhire\b', r'\bcall\b', r'\bschedule\b', r'\bbook\b',
     r'\bget a quote\b', r'\bfree estimate\b', r'\bemergency\b',
     r'\bsame day\b', r'\b24 hour\b', r'\b24/7\b', r'\btoday\b',
@@ -507,10 +507,11 @@ def classify_theme(kw):
 
     # ── Ventilation / Duct (actual ventilation, not heating/cooling) ──────
     # Check BEFORE lighting to avoid air handler stealing chandelier
-    if any(t in kl for t in ['duct cleaning','air duct','ductwork','duct work',
-                               'hrv','erv','heat recovery','energy recovery',
+    if (any(t in kl for t in ['duct cleaning','air duct','ductwork','duct work',
+                               'heat recovery','energy recovery',
                                'ventilation system','mechanical ventilation',
-                               'air handler','air handling']):
+                               'air handler','air handling']) or
+            re.search(r'\bhrv\b', kl) or re.search(r'\berv\b', kl)):
         return 'Ventilation / Duct'
     # drainage system → Drain / Sewer (not Ventilation)
     if 'drainage system' in kl or 'drain system' in kl:
@@ -569,10 +570,11 @@ def cat_url(url):
     if p.rstrip('/') == '/heating': c.update({'furnace','boiler','heat_pump','hvac_general'})
     if any(t in p for t in ['boiler','steam-boiler']): c.add('boiler')
     if 'heat-pump' in p: c.add('heat_pump')
-    if any(t in p for t in ['ac-tune','ac-filter','ac-install','evaporator','buffalo-repair','68-ac']): c.add('ac_cooling')
+    if any(t in p for t in ['ac-tune','ac-filter','ac-install','evaporator','ac-repair','68-ac',
+                               'air-conditioning-repair','ac-service','ac-unit','ac-fix']): c.add('ac_cooling')
     if p.rstrip('/') == '/air-conditioning': c.update({'ac_cooling','hvac_general'})
     if any(t in p for t in ['ductless','mini-split']): c.update({'ductless','ac_cooling','heat_pump'})
-    if any(t in p for t in ['commercial-hvac','duct-cleaning','air-duct','air-handler','trane']): c.add('hvac_general')
+    if any(t in p for t in ['commercial-hvac','duct-cleaning','air-duct','air-handler']): c.add('hvac_general')
     if 'commercial-hvac' in p: c.add('commercial')
     if 'geothermal' in p: c.update({'geothermal','hvac_general'})
     if any(t in p for t in ['electric','electrical','circuit-breaker','surge-protection','energy-efficient']): c.add('electrical')
@@ -588,14 +590,37 @@ def cat_url(url):
     if 'sprinkler' in p: c.add('sprinkler')
     if any(t in p for t in ['residential-plumbing','emergency-plumber','commercial-plumbing','plumbing-inspection']): c.add('plumbing_general')
     if p.rstrip('/') in ['/maintenance-plans']: c.update({'plumbing_general','hvac_general','electrical'})
-    for loc in ['cheektowaga','amherst','hamburg','lancaster','west-seneca','orchard-park',
-                'east-aurora','springville','alden','akron','batavia','clarence','depew',
-                'elma','eden','marilla','holland','wales','darien','medina','attica',
-                'boston-ny','grand-island','bennington','west-valley','williamsville','tonawanda']:
-        if loc in p: c.add('location'); c.add('loc:'+loc.replace('-',' ')); break
+    # Location detection: match any URL segment that looks like a city/area
+    # Uses a generic pattern rather than a hardcoded list
+    path_parts = [x for x in re.split(r'[/\-]', p) if len(x) >= 4]
+    # A URL segment is treated as a location if it appears at the start of the path
+    # after the domain and is not a known service word
+    SERVICE_SLUGS = {'repair','service','install','maintenance','emergency','commercial',
+                     'residential','plumbing','heating','cooling','electrical',
+                     'drain','sewer','water','heater','furnace','boiler','hvac','blog',
+                     'about','contact','careers','privacy','terms','sitemap'}
+    # Only treat as location page if the URL has a clear location+service structure:
+    # e.g. /chicago/furnace-repair/ or /services/denver/ — location AND service present
+    # Location detection: URL must have structure /city/service/ (separate path segments)
+    # NOT /cityname-service/ (hyphenated slug like buffalo-repair)
+    url_segments = [s for s in p.strip('/').split('/') if s]  # split on /
+    non_svc_segs = [s for s in url_segments if s not in SERVICE_SLUGS
+                    and s.isalpha() and len(s) >= 4 and '-' not in s]
+    svc_segs     = [s for s in url_segments if any(sw in s for sw in SERVICE_SLUGS)]
+    if non_svc_segs and svc_segs and len(url_segments) >= 2:
+        # Has separate path segments for location and service
+        for seg in non_svc_segs[:1]:
+            c.add('location'); c.add('loc:'+seg)
     if '/blog/' in p: c.add('blog')
-    for brand in ['trane','mitsubishi','cummins','rheem','bradford','lennox']:
-        if brand in p: c.add('brand:'+brand)
+    # Brand detection: any word in URL that is not a common service word
+    # This covers any brand (Trane, Mitsubishi, Lennox, Carrier, Goodman etc.)
+    # without needing a hardcoded list
+    for seg in re.split(r'[/\-]', p):
+        if (len(seg) >= 4 and seg.isalpha() and seg not in
+                {'repair','service','install','heating','cooling','electric','plumbing',
+                 'drain','sewer','water','furnace','boiler','hvac','blog',
+                 'about','contact','home','residential','commercial','emergency'}):
+            c.add('brand:'+seg)
     if not (c - {'blog'}): c.add('plumbing_general')
     return frozenset(c)
 
@@ -659,8 +684,20 @@ def cat_kw(kw):
           '24 hour plumb','plumbing company','plumbing service','local plumb','home plumb',
           'plumb contractor','licensed plumb','best plumb','professional plumb']
     if any(t in kl for t in PL): c.add('plumbing_general')
-    for brand in ['trane','mitsubishi','cummins','rheem','bradford','lennox']:
-        if brand in kl: c.add('brand:'+brand)
+    # Brand detection in keywords: same approach as URL brand detection
+    for word in re.findall(r'\b[a-z]{4,}\b', kl):
+        if (word not in {'repair','service','install','heating','cooling','electrical',
+                         'plumbing','drain','sewer','water','furnace','boiler','hvac',
+                         'pump','tank','panel','filter','unit','system','pipe','line',
+                         'near','local','best','cheap','cost','price','free','home',
+                         'residential','commercial','emergency','professional','licensed',
+                         'certified','company','contractor','plumber','electrician'} and
+                len(word) >= 4 and
+                re.search(r'\b' + word + r'\b', kl)):
+            # Only flag as brand if it appears alongside a service term
+            if any(st in kl for st in ['repair','install','service','dealer','authorized',
+                                        'certified','technician','heat pump','furnace']):
+                c.add('brand:'+word)
     if 'heater' in kl and 'water heater' not in kl and 'water_heater' not in c: c.update({'furnace','hvac_general'})
     if re.search(r'\bheating\b', kl) and not (c & {'furnace','boiler','heat_pump','hvac_general','water_heater'}): c.update({'furnace','hvac_general'})
     if re.search(r'\bcooling\b', kl) and not (c & {'ac_cooling','ductless','heat_pump','hvac_general'}): c.update({'ac_cooling','hvac_general'})
@@ -702,6 +739,7 @@ def call_claude(api_key, prompt, max_tokens=2000, timeout=50):
     payload = json.dumps({
         "model": "claude-sonnet-4-20250514",
         "max_tokens": max_tokens,
+        "temperature": 0,
         "messages": [{"role": "user", "content": prompt}]
     }).encode()
     req = urllib.request.Request(
@@ -924,6 +962,107 @@ Keywords: {json.dumps(kw_list)}"""
                 if attempt < 2: time.sleep(3)
         time.sleep(0.2)
     return out
+
+
+# ── PHASE 0: GENERATE LOCKED TAXONOMY ────────────────────────────────────
+def generate_taxonomy(api_key, biz_desc, sf_df, status_text, progress_bar):
+    """
+    Generate a locked taxonomy (Themes + Sub-themes) specific to this business
+    using the business description and page titles/H1s from Screaming Frog.
+
+    This runs ONCE before any keyword processing.
+    All subsequent Claude calls use this taxonomy — guaranteeing consistent
+    theme and sub-theme names across runs, accounts and websites.
+    """
+    status_text.text("Phase 0: Generating taxonomy for this business...")
+    progress_bar.progress(1)
+
+    # Collect page titles and H1s from Screaming Frog (up to 60 pages)
+    page_signals = []
+    for _, row in sf_df.head(120).iterrows():
+        title = str(row.get('Title 1', row.get('Page Title','')) or '').strip()
+        h1    = str(row.get('H1-1', row.get('H1','')) or '').strip()
+        # Clean brand suffix from title
+        title_clean = re.sub(r'\s*[\|\-–]\s*.{0,40}$', '', title).strip()
+        if title_clean and title_clean.lower() not in ('nan','none',''):
+            page_signals.append(title_clean)
+        elif h1 and h1.lower() not in ('nan','none',''):
+            page_signals.append(h1)
+
+    # Deduplicate and limit
+    seen = set()
+    unique_signals = []
+    for s in page_signals:
+        if s.lower() not in seen:
+            seen.add(s.lower())
+            unique_signals.append(s)
+        if len(unique_signals) >= 60:
+            break
+
+    prompt = f"""You are an expert SEO strategist building a content taxonomy.
+
+Business description:
+{biz_desc}
+
+Existing page titles from the website:
+{json.dumps(unique_signals)}
+
+Generate a complete SEO content taxonomy for this business.
+
+Rules:
+1. Themes = top-level service categories (6-16 themes)
+2. Sub-themes = specific content topics within each theme (3-8 per theme)
+3. Each sub-theme represents exactly ONE page or blog post
+4. Include BOTH transactional sub-themes (service pages) AND informational
+   sub-themes (blog posts) for each theme
+5. Sub-theme names: max 4 words, Title Case, specific not generic
+6. Base themes on the BUSINESS DESCRIPTION — not just existing pages
+   (include service areas even if no page exists yet)
+
+Good sub-theme examples:
+  "Furnace Repair", "Furnace Installation", "Furnace Tune-up",
+  "Furnace Cost Guide", "Furnace Troubleshooting", "Furnace Lifespan"
+
+Bad sub-theme examples (too generic):
+  "Service", "Repair", "Guide", "Info"
+
+Return ONLY valid JSON:
+{{
+  "taxonomy": {{
+    "Theme Name": ["Sub-theme 1", "Sub-theme 2", "Sub-theme 3"],
+    ...
+  }}
+}}"""
+
+    try:
+        result = call_claude(api_key, prompt, 3000, 60)
+        taxonomy = result.get('taxonomy', {})
+        if taxonomy:
+            progress_bar.progress(2)
+            n_themes = len(taxonomy)
+            n_subs   = sum(len(v) for v in taxonomy.values())
+            status_text.text(f"Phase 0: Taxonomy ready — {n_themes} themes, {n_subs} sub-themes")
+            return taxonomy
+    except Exception as e:
+        pass
+
+    # Fallback: empty taxonomy (tool still works, just less constrained)
+    progress_bar.progress(2)
+    status_text.text("Phase 0: Taxonomy generation skipped — using adaptive mode")
+    return {}
+
+def taxonomy_to_prompt_block(taxonomy):
+    """
+    Format the locked taxonomy as a constraint block for Claude prompts.
+    Injected into every theme/sub-theme assignment prompt.
+    """
+    if not taxonomy:
+        return ""
+    lines = ["\nYOU MUST use ONLY these themes and sub-themes (no new ones):"]
+    for theme, subs in taxonomy.items():
+        lines.append(f"  {theme}: {', '.join(subs)}")
+    lines.append("If a keyword doesn't fit exactly, use the closest sub-theme.\n")
+    return "\n".join(lines)
 
 # ── PHASE 1: GSC VALIDATION ───────────────────────────────────────────────
 def phase1_gsc(gsc_df, sf_df, weights, status_text, progress_bar):
@@ -1235,7 +1374,7 @@ def build_content_groups(mapped):
     return mapped
 
 # ── PHASE 5: THEME + SUB-THEME — FULLY AI DRIVEN ─────────────────────────
-def phase5_themes(mapped, url_df, api_key, biz_desc, status_text, progress_bar):
+def phase5_themes(mapped, url_df, api_key, biz_desc, taxonomy, status_text, progress_bar):
     """
     Claude assigns BOTH Theme and Sub-theme for every keyword.
     Source of truth: the keyword text + business description.
@@ -1273,12 +1412,13 @@ def phase5_themes(mapped, url_df, api_key, biz_desc, status_text, progress_bar):
 
             kw_list = [{"keyword": x['keyword'], "intent": x['intent']} for x in batch]
 
+            taxonomy_block = taxonomy_to_prompt_block(taxonomy)
             prompt = f"""You are an expert SEO strategist. For each keyword assign:
 1. "theme"    — the top-level service category this keyword belongs to
 2. "subtheme" — the specific content topic (precise enough for ONE page/post)
 
 Business context: {biz_desc}
-
+{taxonomy_block}
 THEME must reflect what SERVICE the keyword is about — derived entirely from
 the keyword text, not from any URL or page.
 
@@ -1289,20 +1429,6 @@ SUBTHEME rules:
 - Never use generic labels like "Service", "Repair" alone — always include the entity
   Good: "Furnace Repair", "AC Tune-up Cost", "Drain Odor Solutions", "Water Heater Lifespan"
   Bad:  "Heating", "Service", "Repair", "HVAC"
-
-Examples:
-  "furnace repair near me"              → {{"theme":"Furnace / Heating","subtheme":"Furnace Repair"}}
-  "how long does a furnace last"        → {{"theme":"Furnace / Heating","subtheme":"Furnace Lifespan"}}
-  "furnace tune up cost"                → {{"theme":"Furnace / Heating","subtheme":"Furnace Tune-up Cost"}}
-  "water filter installation near me"   → {{"theme":"Water Treatment","subtheme":"Water Filtration Installation"}}
-  "breaker repair service"              → {{"theme":"Electrical","subtheme":"Circuit Breaker Repair"}}
-  "heater repair services near me"      → {{"theme":"Furnace / Heating","subtheme":"Furnace Repair"}}
-  "ac blows warm air"                   → {{"theme":"AC / Cooling","subtheme":"AC Troubleshooting"}}
-  "sewer cleaning greenlawn"            → {{"theme":"Drain / Sewer","subtheme":"Sewer Cleaning"}}
-  "chandelier installation near me"     → {{"theme":"Electrical","subtheme":"Light Fixture Installation"}}
-  "heating and cooling near me"         → {{"theme":"HVAC General","subtheme":"HVAC Service"}}
-  "hvac near me"                        → {{"theme":"HVAC General","subtheme":"HVAC Service"}}
-  "heater service near me"              → {{"theme":"Furnace / Heating","subtheme":"Furnace Service"}}
 
 Return ONLY valid JSON: {{"keyword": {{"theme": "X", "subtheme": "Y"}}, ...}}
 
@@ -1385,7 +1511,7 @@ def phase6_cluster(mapped, rel_map, api_key, status_text, progress_bar):
         elif any(t in kl for t in ['smell','odor','stink']): svc = 'Odor Solutions'
         elif any(t in kl for t in ['clog','clogged','unclog','blockage']): svc = 'Clog Solutions'
         elif any(t in kl for t in ['emergency','urgent','24 hour','same day']): svc = 'Emergency Service'
-        elif any(t in kl for t in ['near me','local','in buffalo','western ny']): svc = 'Local Service'
+        elif any(t in kl for t in ['near me','local','in my area','close to']): svc = 'Local Service'
         elif any(t in kl for t in ['what is','how does','how to','why','what are']): svc = 'Guide'
         else: svc = 'Service'
         # Entity
@@ -1445,78 +1571,104 @@ THEME_CODES = {
 }
 
 # Words that are NEVER location names
+US_STATES = {
+    'al','ak','az','ar','ca','co','ct','de','fl','ga',
+    'hi','id','il','in','ia','ks','ky','la','me','md',
+    'ma','mi','mn','ms','mo','mt','ne','nv','nh','nj',
+    'nm','ny','nc','nd','oh','ok','or','pa','ri','sc',
+    'sd','tn','tx','ut','vt','va','wa','wv','wi','wy','dc',
+}
 def extract_location(kw):
     """
-    Detect if a keyword contains a specific geographic location name.
-    
-    Requires geographic context — must appear after "in", "near", or at the
-    end of the keyword after a service term. Generic words like "temperature",
-    "normal", "best" are NEVER locations regardless of frequency.
-    
-    Returns the location name string, or empty string if none found.
+    Detect specific geographic location in a keyword.
+    Handles:
+      1. Explicit: "furnace repair in chicago" / "plumber near dallas"
+      2. Service + city + state: "plumber clifton park ny"
+      3. Service + multi-word city: "hvac repair west palm beach"
+      4. City + state abbreviation at end: "drain cleaning buffalo ny"
+    Returns location string or empty string.
     """
     kl = kw.lower().strip()
-    
-    # Pattern 1: explicit "in [place]" or "near [place]"
-    m = re.search(r'\b(?:in|near|for)\s+([a-z][a-z\s]{2,20})$', kl)
-    if m:
-        candidate = m.group(1).strip()
-        # Reject if candidate is a service/common word
-        if not any(sw in candidate for sw in [
-            'me','area','my','the','your','our','home','house',
-            'local','area','city','town','state','country']):
-            return candidate
-    
-    # Pattern 2: "[service] [location]" — location at end after service word
-    # Only match known geographic-style words (multi-word city names or proper nouns)
-    # Look for patterns like "sewer cleaning greenlawn" or "drain service buffalo ny"
+
+    # Common words that are NEVER location names
+    NOT_LOC = {
+        'me','area','my','the','your','our','home','house','local','state',
+        'repair','repairs','service','services','install','installation',
+        'cleaning','clean','company','companies','contractor','contractors',
+        'plumber','electrician','technician','professional','emergency',
+        'maintenance','replacement','near','local','best','top','cheap',
+        'affordable','licensed','certified','residential','commercial',
+    }
+
     SERVICE_WORDS = {
         'repair','repairs','service','services','install','installation',
-        'cleaning','clean','company','contractor','plumber','electrician',
-        'technician','maintenance','replacement','emergency','near','local',
+        'cleaning','clean','company','companies','contractor','contractors',
+        'plumber','plumbers','electrician','electricians','technician',
+        'technicians','maintenance','replacement','emergency','near','local',
+        'hvac','drain','sewer','furnace','boiler','heater','plumbing',
+        'electrical','generator','pump','heating','cooling',
     }
+
     words = kl.split()
-    # Check if last 1-2 words look like a location (after stripping service words)
-    if len(words) >= 3:
-        # Get the last word(s) that are not service/common words
-        tail_words = []
-        for w in reversed(words):
-            if w in SERVICE_WORDS or w in {
-                'the','a','an','and','or','of','for','to','me',
-                'my','near','best','top','good','great','cheap',
-                'affordable','professional','licensed','certified',
-                'residential','commercial','industrial','home','house',
-            }:
+
+    # ── Pattern 1: "... in/near/for [city] [optional state]" ─────────────
+    m = re.search(r'\b(?:in|near|for)\s+([a-z][a-z\s]{2,30})$', kl)
+    if m:
+        candidate = m.group(1).strip()
+        cwords = candidate.split()
+        # Remove trailing state abbreviation for rejection check
+        core = ' '.join(cwords[:-1]) if (len(cwords) > 1 and cwords[-1] in US_STATES) else candidate
+        if not any(w in NOT_LOC for w in core.split()):
+            return candidate
+
+    # ── Pattern 2: "[service] [city words] [state abbrev]" ───────────────
+    # e.g. "plumber clifton park ny", "ac repair dallas tx"
+    # Last word is a 2-letter state abbreviation
+    if len(words) >= 3 and words[-1] in US_STATES:
+        state = words[-1]
+        # Find where service words end
+        first_non_service = len(words)
+        for i, w in enumerate(words):
+            if w not in SERVICE_WORDS and len(w) >= 3 and w not in NOT_LOC:
+                first_non_service = i
                 break
-            if len(w) >= 4 and w.isalpha():
-                tail_words.insert(0, w)
+        # City = words between first non-service word and state abbreviation
+        city_words = words[first_non_service:-1]
+        if city_words:
+            candidate = ' '.join(city_words) + ' ' + state
+            if not any(w in NOT_LOC for w in city_words):
+                return candidate
+
+    # ── Pattern 3: "[service] [city words]" at end — no state abbrev ─────
+    # e.g. "hvac repair rochester", "sewer cleaning greenlawn"
+    # City must be at end, after at least one service word at start
+    has_service_start = any(w in SERVICE_WORDS for w in words[:2])
+    if has_service_start and len(words) >= 3:
+        tail = []
+        for w in reversed(words):
+            if w in SERVICE_WORDS or w in NOT_LOC or len(w) < 3:
+                break
+            if w.isalpha():
+                tail.insert(0, w)
             else:
                 break
-        if tail_words:
-            candidate = ' '.join(tail_words)
-            # Must be at least 4 chars and the keyword must start with a service term
-            has_service_start = any(kl.startswith(sw) or f' {sw} ' in kl 
-                                    for sw in SERVICE_WORDS)
-            if has_service_start and len(candidate) >= 4:
-                # Final check: reject obvious non-locations
-                NON_PLACE = {
-                    'temperature','normal','environment','conditioner',
-                    'conditioning','installation','replacement','maintenance',
-                    'inspection','detection','protection','solutions',
-                    'problems','issues','repair','service','company',
-                    'contractor','professional','emergency','affordable',
-                    'residential','commercial','industrial','quality',
-                    'systems','units','panels','filters','coils',
-                    'cleaning','treatment','testing','pumping',
-                    'experts','specialists','technicians','plumbers',
-                    'electricians','companies','contractors','services',
-                    'cost','price','pricing','costs','prices','estimate',
-                    'weather','climate','season','seasonal','winter','summer',
-                    'spring','fall','cold','warm','heat','cool','degree',
-                    'setting','settings','level','levels','rating','rated',
-                }
-                if candidate not in NON_PLACE:
-                    return candidate
+        if tail and len(' '.join(tail)) >= 4:
+            # Reject obvious non-locations
+            NOT_PLACE = {
+                'temperature','normal','environment','conditioner',
+                'conditioning','installation','replacement','maintenance',
+                'inspection','detection','protection','solutions',
+                'problems','issues','quality','systems','units',
+                'panels','filters','coils','cleaning','treatment',
+                'testing','experts','specialists','cost','price',
+                'pricing','costs','prices','estimate','weather',
+                'climate','season','seasonal','degree','setting',
+                'settings','level','levels','rating','rated',
+            }
+            candidate = ' '.join(tail)
+            if candidate not in NOT_PLACE and not any(w in NOT_PLACE for w in tail):
+                return candidate
+
     return ''
 
 
@@ -1660,21 +1812,28 @@ def get_group_action(r, rel):
         return 'Page exists — optimise', 'Optimise existing service page for this keyword'
 
     # Gap actions
-    # Location group: transactional + has real location → location service page
-    # Blog group: informational majority → blog post
-    # Service group: transactional majority → service page
+    # Rule 1: keyword's OWN intent takes priority for informational keywords
+    #   → "what does X look like" is ALWAYS a blog regardless of group majority
+    # Rule 2: location keywords with transactional intent → location service page
+    # Rule 3: group majority decides for everything else
+    kw_intent = r.get('Intent', '')
     if rel in ('RELEVANT', 'BORDERLINE'):
+        # Informational keyword → always blog, never service page
+        if kw_intent == 'Informational':
+            return 'Business relevant gap', 'Create new blog post'
+        # Location + transactional → location service page
         if is_loc and gtype == 'Service page':
             return 'Business relevant gap', 'Create new location service page'
-        elif gtype == 'Blog post':
-            return 'Business relevant gap', 'Create new blog post'
-        else:
+        # Transactional group → service page
+        if gtype == 'Service page':
             return 'Business relevant gap', 'Create new service page'
+        # Default (informational group or ambiguous) → blog post
+        return 'Business relevant gap', 'Create new blog post'
 
     return 'True content gap', 'Evaluate — may need new page'
 
 # ── EXCEL OUTPUT ──────────────────────────────────────────────────────────
-def build_excel(gsc_df, mapped, rel_map, clusters, url_clusters):
+def build_excel(gsc_df, mapped, rel_map, clusters, url_clusters, taxonomy=None):
     wb = Workbook()
     bf = Font(size=10); lf = Font(size=10, color='0563C1'); mf = Font(size=10, italic=True, color='888888')
     C = dict(H='1D9E75', GR='EAF3DE', BL='E8F0FE', YL='FFFBEA', RD='FDECEA',
@@ -1859,6 +2018,20 @@ def build_excel(gsc_df, mapped, rel_map, clusters, url_clusters):
             c.font = Font(size=10, bold=is_primary)
         dr += 1
     cw(ws6, [22,28,12,10,48,12,14,15,12,28,42]); ws6.freeze_panes = f'A{len(summary)+10}'
+    # Taxonomy reference tab
+    if taxonomy:
+        wst = wb.create_sheet('Taxonomy Reference')
+        wst['A1'] = 'Locked Taxonomy — used for consistent theme/sub-theme assignment'
+        wst['A1'].font = Font(bold=True, size=12, color='0F6E56')
+        wst.merge_cells('A1:C1')
+        hdr(wst, 2, ['Theme', 'Sub-themes', 'Count'])
+        for i, (theme, subs) in enumerate(taxonomy.items()):
+            r = i + 3
+            wst.cell(row=r, column=1, value=theme).font = Font(size=10, bold=True)
+            wst.cell(row=r, column=2, value=', '.join(subs)).font = Font(size=10)
+            wst.cell(row=r, column=3, value=len(subs)).font = Font(size=10)
+        cw(wst, [28, 80, 8])
+
     buf = io.BytesIO(); wb.save(buf); buf.seek(0); return buf
 
 # ── UI ────────────────────────────────────────────────────────────────────
@@ -1967,6 +2140,9 @@ if st.button("🚀 Run Full Analysis", disabled=bool(issues), use_container_widt
     t_start      = time.time()
 
     try:
+        # Phase 0: Generate locked taxonomy for this business
+        taxonomy = generate_taxonomy(api_key, biz_desc, sf_df, status_text, progress_bar)
+
         # Phase 1
         gsc_val, url_df, gsc_dedup, stop, hp_slugs = phase1_gsc(gsc_df, sf_df, weights, status_text, progress_bar)
 
@@ -1983,7 +2159,7 @@ if st.button("🚀 Run Full Analysis", disabled=bool(issues), use_container_widt
                                                   status_text, progress_bar)
 
         # Phase 5: Theme + Sub-theme
-        mapped = phase5_themes(mapped, url_df, api_key, biz_desc, status_text, progress_bar)
+        mapped = phase5_themes(mapped, url_df, api_key, biz_desc, taxonomy, status_text, progress_bar)
 
         # Phase 6: Clustering
         clusters, url_clusters = phase6_cluster(mapped, rel_map, api_key, status_text, progress_bar)
@@ -2046,7 +2222,7 @@ if st.button("🚀 Run Full Analysis", disabled=bool(issues), use_container_widt
 
         progress_bar.progress(99)
         status_text.text("Building Excel output...")
-        excel_buf = build_excel(gsc_val, mapped, rel_map, clusters, url_clusters)
+        excel_buf = build_excel(gsc_val, mapped, rel_map, clusters, url_clusters, taxonomy)
         progress_bar.progress(100)
         elapsed = round(time.time() - t_start)
         status_text.text(f"✅ Done in {elapsed//60}m {elapsed%60}s")
