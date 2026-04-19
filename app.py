@@ -1785,49 +1785,72 @@ def assign_content_groups(mapped, api_key, biz_desc, status_text, progress_bar):
     return mapped
 
 
+def is_location_url(url):
+    """
+    Check if a URL is a dedicated location page.
+    e.g. /buffalo/furnace-repair/ or /chicago/plumber/ → True
+         /furnace-repair/ or /blog/post/ → False
+    """
+    if not url: return False
+    path = re.sub(r'https?://[^/]+', '', url.lower()).strip('/')
+    segments = [s for s in path.split('/') if s]
+    SERVICE_SLUGS = {'repair','service','install','maintenance','emergency','commercial',
+                     'residential','plumbing','heating','cooling','electrical','drain',
+                     'sewer','water','heater','furnace','boiler','hvac','blog','about',
+                     'contact','services','cleaning','replacement','installation',
+                     'generator','pump','electric','electrical','ac','blog'}
+    if len(segments) >= 2:
+        # First segment is a city/area if it's alphabetic and not a service word
+        first = re.sub(r'[\-_]', '', segments[0])
+        if first.isalpha() and first not in SERVICE_SLUGS and len(first) >= 3:
+            return True
+    return False
+
 def get_group_action(r, rel):
     """
     Determine action for a keyword based on its Content Group type.
-    One Content Group = one action. Never mix service page and blog in same group.
+    Location-aware: keywords with location names get location page actions.
+    One Content Group = one action. Informational keywords always get blog action.
     """
-    url    = r.get('Landing Page', '')
-    rs     = r.get('Ranking Status', '')
-    src    = r.get('Match Source', '')
-    fs     = r.get('Final Score', 0)
-    gtype  = r.get('_group_type', '')   # group-level: 'Service page' or 'Blog post'
-    is_loc = r.get('_is_loc_group', False)
+    url       = r.get('Landing Page', '')
+    rs        = r.get('Ranking Status', '')
+    src_match = r.get('Match Source', '')
+    gtype     = r.get('_group_type', '')
+    is_loc    = r.get('_is_loc_group', False)
+    kw_intent = r.get('Intent', '')
 
-    # Existing page actions
+    # ── Existing page actions ──────────────────────────────────────────────
     if url and rs == 'Ranking p1-10':
         return 'Confirmed existing page', 'Monitor — already ranking well'
     if rs == 'Quick win p11-20':
         return 'Quick win — optimise', 'Optimise title, meta, H1 — almost ranking'
     if rs in ['Weak ranking p21-50', 'Very weak p51-100']:
         return 'Weak ranking', 'Improve page content + internal links'
-    if url and 'Claude semantic' in str(src):
+    if url and 'Claude semantic' in str(src_match):
         return 'Blog exists — optimise', 'Update blog title/meta/H1 for this keyword'
     if url and '/blog/' in url:
         return 'Page exists — optimise', 'Optimise existing blog post for this keyword'
     if url:
+        # Location keyword on existing page
+        if is_loc:
+            if is_location_url(url):
+                return 'Page exists — optimise', 'Optimise existing location page'
+            else:
+                return 'Page exists — optimise', 'Create dedicated location page for this keyword'
         return 'Page exists — optimise', 'Optimise existing service page for this keyword'
 
-    # Gap actions
-    # Rule 1: keyword's OWN intent takes priority for informational keywords
-    #   → "what does X look like" is ALWAYS a blog regardless of group majority
-    # Rule 2: location keywords with transactional intent → location service page
-    # Rule 3: group majority decides for everything else
-    kw_intent = r.get('Intent', '')
-    if rel in ('RELEVANT', 'BORDERLINE'):
-        # Informational keyword → always blog, never service page
-        if kw_intent == 'Informational':
+    # ── Gap actions (no existing page) ────────────────────────────────────
+    # Informational keywords always → blog post
+    if kw_intent == 'Informational':
+        if rel in ('RELEVANT', 'BORDERLINE'):
             return 'Business relevant gap', 'Create new blog post'
-        # Location + transactional → location service page
-        if is_loc and gtype == 'Service page':
+        return 'True content gap', 'Evaluate — may need new page'
+
+    if rel in ('RELEVANT', 'BORDERLINE'):
+        if is_loc:
             return 'Business relevant gap', 'Create new location service page'
-        # Transactional group → service page
         if gtype == 'Service page':
             return 'Business relevant gap', 'Create new service page'
-        # Default (informational group or ambiguous) → blog post
         return 'Business relevant gap', 'Create new blog post'
 
     return 'True content gap', 'Evaluate — may need new page'
@@ -1879,7 +1902,7 @@ def build_excel(gsc_df, mapped, rel_map, clusters, url_clusters, taxonomy=None):
 
     ws3 = wb.create_sheet('Opportunity Classification')
     hdr(ws3, 1, ['Theme','Sub-theme','Content Group','Primary?','Keyword','Volume',
-                 'Your Position','Landing Page','Intent','Final Score','Opportunity Type','Action'])
+                 'Your Position','Mapped URL','Intent','Final Score','Opportunity Type','Action'])
     OPP_F = {'Confirmed existing page': make_fill(C['GR']), 'Quick win — optimise': make_fill(C['DGR']),
              'Weak ranking': make_fill(C['YL']), 'Page exists — optimise': make_fill(C['BL']),
              'Blog exists — optimise': make_fill(C['OR']), 'Business relevant gap': make_fill(C['PU']),
@@ -1984,7 +2007,7 @@ def build_excel(gsc_df, mapped, rel_map, clusters, url_clusters, taxonomy=None):
     ws6.cell(row=dr, column=1, value='Detailed Action List — sorted by Theme > Sub-theme > Priority').font = Font(bold=True, size=12, color='0F6E56')
     ws6.merge_cells(start_row=dr, start_column=1, end_row=dr, end_column=11); dr += 1
     hdr(ws6, dr, ['Theme','Sub-theme','Content Group','Primary?','Keyword','Volume',
-                  'Your Position','Intent','Final Score','Opportunity','Action']); dr += 1
+                  'Your Position','Intent','Final Score','Opportunity','Action','Mapped URL']); dr += 1
     PORD = {'Quick win — optimise':1,'Weak ranking':2,'Page exists — optimise':3,
             'Blog exists — optimise':3,'Business relevant gap':4,'True content gap':5,
             'Confirmed existing page':6}
@@ -2004,20 +2027,35 @@ def build_excel(gsc_df, mapped, rel_map, clusters, url_clusters, taxonomy=None):
         x.get('Content Group','zzz'),
         x.get('Primary Keyword','') != 'PRIMARY',
         x['po'], -x['Volume']))
+    # Build CG → URL mapping so every keyword in same group shows same URL
+    cg_url_map = {}
+    for r in mapped:
+        cg = r.get('Content Group','')
+        url = r.get('Landing Page','') or ''
+        if cg and url and cg not in cg_url_map:
+            cg_url_map[cg] = url
+
     for item in all_items:
         fill = AF.get(item['opp'], make_fill(C['WH']))
         is_primary = item.get('Primary Keyword','') == 'PRIMARY'
+        # Show mapped URL only for optimise actions, blank for create-new actions
+        item_url = item.get('Landing Page','') or ''
+        cg_url   = cg_url_map.get(item.get('Content Group',''), '')
+        show_url = cg_url if item_url or cg_url else ''
+        # Only show URL when action involves an existing page
+        is_optimise = any(x in item['act'] for x in ['Optimise','optimise','Update','Monitor'])
+        display_url = show_url if is_optimise else ''
         for col, v in enumerate([item.get('Theme',''), item.get('Sub-theme',''),
                                   item.get('Content Group',''),
                                   '★ PRIMARY' if is_primary else '',
                                   item['Keyword'], item['Volume'], item['Your Position'],
                                   item['Intent'], item['Final Score'],
-                                  item['opp'], item['act']], 1):
+                                  item['opp'], item['act'], display_url], 1):
             c = ws6.cell(row=dr, column=col, value=v)
             c.fill = fill
-            c.font = Font(size=10, bold=is_primary)
+            c.font = Font(size=10, bold=is_primary, color='0563C1' if col==12 and display_url else '000000')
         dr += 1
-    cw(ws6, [22,28,12,10,48,12,14,15,12,28,42]); ws6.freeze_panes = f'A{len(summary)+10}'
+    cw(ws6, [22,28,12,10,48,12,14,15,12,28,42,65]); ws6.freeze_panes = f'A{len(summary)+10}'
     # Taxonomy reference tab
     if taxonomy:
         wst = wb.create_sheet('Taxonomy Reference')
