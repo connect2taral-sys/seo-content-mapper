@@ -1444,6 +1444,36 @@ THEME_CODES = {
     'Gas Line':'GL','Ductless Mini Split':'DM','Other':'OT',
 }
 
+# Words that are NEVER location names
+NON_LOC = {
+    'repair','repairs','service','services','install','installation','replace','replacement',
+    'maintenance','cleaning','clean','cleaner','company','companies','contractor','contractors',
+    'professional','professionals','emergency','urgent','licensed','certified','local','near',
+    'best','top','cheap','affordable','residential','commercial','industrial','cost','price',
+    'prices','pricing','estimate','estimates','quote','quotes','free','same','day','hour',
+    'hours','week','month','annual','seasonal','indoor','outdoor','home','house','building',
+    'business','office','apartment','condo','drain','sewer','plumb','plumber','plumbing',
+    'hvac','heat','heating','cool','cooling','electric','electrical','water','heater',
+    'furnace','boiler','pump','pipe','pipes','gas','line','lines','system','systems','unit',
+    'units','duct','ducts','filter','filters','coil','coils','valve','valves','tank','tanks',
+    'panel','panels','breaker','outlet','outlets','wiring','wire','generator','generators',
+    'sump','backflow','toilet','sink','faucet','shower','tub','bathroom','kitchen','disposal',
+    'garbage','detector','carbon','monoxide','surge','protect','inspection','inspect','that',
+    'with','from','into','onto','your','their','area','areas','type','types','brand','brands',
+    'model','models','review','reviews','size','sized','large','small','existing','current',
+    'modern','standard','basic','advanced','complete','full','whole','entire','find','hire',
+    'call','schedule','book','need','want','looking','search','how','what','why','when',
+    'does','which','that','this','these','those','such','intitle','site','blog','near',
+}
+
+def extract_location(kw, rare_words):
+    """Detect specific location name in keyword. Returns location string or empty string."""
+    kl = kw.lower()
+    words = re.findall(r'\b[a-z]{4,}\b', kl)
+    loc_words = [w for w in words if w in rare_words and w not in NON_LOC]
+    return ' '.join(loc_words) if loc_words else ''
+
+
 def normalise_subthemes(api_key, subthemes, biz_desc, status_text, progress_bar):
     """Pass 2: merge near-identical sub-theme variants into canonical names."""
     if not subthemes: return {}
@@ -1481,55 +1511,128 @@ Sub-themes: {json.dumps(batch)}"""
 
 def assign_content_groups(mapped, api_key, biz_desc, status_text, progress_bar):
     """
-    Assigns Content Group ID and Primary Keyword flag.
-    Content Group = Theme + normalised Sub-theme + URL (or GAP)
-    Same group = same page. Primary = highest volume keyword per group.
+    Assigns Content Group ID, group-level Content Type, Primary Keyword flag.
+    Rules:
+    1. One Content Group = One page = One action (service page OR blog post, never both)
+    2. Location keywords get their own location groups (DS-LOC-001 etc.)
+    3. Primary = highest volume, prefer no generic location qualifier (near me)
+    4. Action at GROUP level = majority intent vote within the group
     """
-    # Step 1: Normalise sub-themes (Pass 2)
+    from collections import Counter, defaultdict
+
+    # Step 1: Normalise sub-themes
     unique_subs = set(r.get('Sub-theme','') for r in mapped if r.get('Sub-theme',''))
     canon_map   = normalise_subthemes(api_key, unique_subs, biz_desc, status_text, progress_bar)
     for r in mapped:
         r['Sub-theme'] = canon_map.get(r.get('Sub-theme',''), r.get('Sub-theme',''))
 
-    # Step 2: Group keywords by (Theme, Sub-theme, URL)
+    # Step 2: Build word frequency to detect rare (location) words
+    all_words = Counter()
+    total_kws = len(mapped)
+    for r in mapped:
+        for w in re.findall(r'\b[a-z]{4,}\b', r['Keyword'].lower()):
+            all_words[w] += 1
+    rare_threshold = max(2, int(total_kws * 0.04))
+    rare_words = {w for w, cnt in all_words.items()
+                  if cnt <= rare_threshold and w not in NON_LOC}
+
+    # Step 3: Tag each keyword with its location
+    for r in mapped:
+        r['_loc'] = extract_location(r['Keyword'], rare_words)
+
+    # Step 4: Build groups — location keywords keyed by their specific location
     groups = {}
     for r in mapped:
-        key = (r.get('Theme','Other'), r.get('Sub-theme',''), r.get('Landing Page','') or 'GAP')
+        theme = r.get('Theme','Other')
+        sub   = r.get('Sub-theme','')
+        url   = r.get('Landing Page','') or 'GAP'
+        loc   = r.get('_loc','')
+        key   = (theme, sub, url, loc)
         groups.setdefault(key, []).append(r)
 
-    # Step 3: Assign IDs — sorted by total volume within each theme
-    from collections import defaultdict
+    # Step 5: Determine group-level content type (majority intent by volume)
+    def grp_type(rows):
+        tv = sum(r['Volume'] for r in rows if r['Intent']=='Transactional')
+        iv = sum(r['Volume'] for r in rows if r['Intent']=='Informational')
+        return 'Service page' if tv >= iv else 'Blog post'
+
+    # Step 6: Assign IDs
     theme_groups = defaultdict(list)
     for key, rows in groups.items():
         theme_groups[key[0]].append((key, sum(r['Volume'] for r in rows)))
 
-    cg_map = {}
+    cg_map = {}; cg_type_map = {}
     for theme, glist in theme_groups.items():
         code = THEME_CODES.get(theme, 'OT')
-        for seq, (key, _) in enumerate(sorted(glist, key=lambda x: -x[1]), 1):
-            cg_map[key] = f"{code}-{seq:03d}"
+        loc_seq = 1; gen_seq = 1
+        for key, _ in sorted(glist, key=lambda x: -x[1]):
+            loc  = key[3]
+            rows = groups[key]
+            gt   = grp_type(rows)
+            if loc:
+                cg_id = f"{code}-LOC-{loc_seq:03d}"; loc_seq += 1
+            else:
+                cg_id = f"{code}-{gen_seq:03d}"; gen_seq += 1
+            cg_map[key] = cg_id; cg_type_map[key] = gt
 
-    # Step 4: Write Content Group to every row
+    # Step 7: Write to rows
     for r in mapped:
-        key = (r.get('Theme','Other'), r.get('Sub-theme',''), r.get('Landing Page','') or 'GAP')
-        r['Content Group']   = cg_map.get(key, '')
-        r['Primary Keyword'] = ''
+        key = (r.get('Theme','Other'), r.get('Sub-theme',''),
+               r.get('Landing Page','') or 'GAP', r.get('_loc',''))
+        r['Content Group']       = cg_map.get(key, '')
+        r['_group_type']         = cg_type_map.get(key, '')
+        r['_is_loc_group']       = bool(r.get('_loc',''))
+        r['Primary Keyword']     = ''
 
-    # Step 5: Flag PRIMARY keyword per group (highest volume, prefer no location qualifiers)
-    LOC_TERMS = ['near me','in buffalo','western ny','buffalo ny','ny ','rochester','amherst',
-                 'cheektowaga','lancaster','tonawanda','depew','clarence','hamburg','west seneca']
+    # Step 8: Flag PRIMARY — highest volume, prefer clean keyword (no "near me")
+    GENERIC_LOC = ['near me','in my area','close to me']
     for key, rows in groups.items():
-        rows_sorted = sorted(
-            rows,
-            key=lambda x: (
-                -x['Volume'],
-                1 if any(t in x['Keyword'].lower() for t in LOC_TERMS) else 0
-            )
-        )
-        rows_sorted[0]['Primary Keyword'] = 'PRIMARY'
+        rows_s = sorted(rows, key=lambda x: (
+            -x['Volume'],
+            1 if any(t in x['Keyword'].lower() for t in GENERIC_LOC) else 0
+        ))
+        rows_s[0]['Primary Keyword'] = 'PRIMARY'
 
     progress_bar.progress(97)
     return mapped
+
+
+def get_group_action(r, rel):
+    """
+    Determine action for a keyword based on its Content Group type.
+    One Content Group = one action. Never mix service page and blog in same group.
+    """
+    url    = r.get('Landing Page', '')
+    rs     = r.get('Ranking Status', '')
+    src    = r.get('Match Source', '')
+    fs     = r.get('Final Score', 0)
+    gtype  = r.get('_group_type', '')   # group-level: 'Service page' or 'Blog post'
+    is_loc = r.get('_is_loc_group', False)
+
+    # Existing page actions
+    if url and rs == 'Ranking p1-10':
+        return 'Confirmed existing page', 'Monitor — already ranking well'
+    if rs == 'Quick win p11-20':
+        return 'Quick win — optimise', 'Optimise title, meta, H1 — almost ranking'
+    if rs in ['Weak ranking p21-50', 'Very weak p51-100']:
+        return 'Weak ranking', 'Improve page content + internal links'
+    if url and 'Claude semantic' in str(src):
+        return 'Blog exists — optimise', 'Update blog title/meta/H1 for this keyword'
+    if url and '/blog/' in url:
+        return 'Page exists — optimise', 'Optimise existing blog post for this keyword'
+    if url:
+        return 'Page exists — optimise', 'Optimise existing service page for this keyword'
+
+    # Gap actions — use GROUP-LEVEL content type, not individual keyword intent
+    if rel in ('RELEVANT', 'BORDERLINE'):
+        if is_loc:
+            return 'Business relevant gap', 'Create new location service page'
+        elif gtype == 'Blog post':
+            return 'Business relevant gap', 'Create new blog post'
+        else:
+            return 'Business relevant gap', 'Create new service page'
+
+    return 'True content gap', 'Evaluate — may need new page'
 
 # ── EXCEL OUTPUT ──────────────────────────────────────────────────────────
 def build_excel(gsc_df, mapped, rel_map, clusters, url_clusters):
@@ -1588,16 +1691,7 @@ def build_excel(gsc_df, mapped, rel_map, clusters, url_clusters):
             x.get('Primary Keyword','') != 'PRIMARY', -x.get('Volume',0))):
         rel = rel_map.get(r['Keyword'], ''); url = r['Landing Page']
         rs  = r['Ranking Status']; fs = r['Final Score']; src = r.get('Match Source', '')
-        if url and rs == 'Ranking p1-10':         opp = 'Confirmed existing page'; act = 'Monitor — already ranking well'
-        elif rs == 'Quick win p11-20':             opp = 'Quick win — optimise';    act = 'Optimise title, meta, H1 — almost ranking'
-        elif rs in ['Weak ranking p21-50','Very weak p51-100']: opp = 'Weak ranking'; act = 'Improve page content + internal links'
-        elif url and 'Claude semantic' in src:     opp = 'Blog exists — optimise';  act = 'Update blog title/meta/H1 for this keyword'
-        elif url and '/blog/' in url:              opp = 'Page exists — optimise';  act = 'Optimise existing blog post for this keyword'
-        elif url:                                  opp = 'Page exists — optimise';  act = 'Optimise existing service page for this keyword'
-        elif rel in ('RELEVANT','BORDERLINE'):
-            opp = 'Business relevant gap'
-            act = 'Create new blog post' if r['Intent']=='Informational' else 'Create new service page'
-        else:                                      opp = 'True content gap'; act = 'Evaluate — may need new page'
+        opp, act = get_group_action(r, rel)
         fill = OPP_F.get(opp, make_fill(C['WH']))
         is_primary = r.get('Primary Keyword','') == 'PRIMARY'
         rn = ws3.max_row + 1
@@ -1658,7 +1752,7 @@ def build_excel(gsc_df, mapped, rel_map, clusters, url_clusters):
         rel = rel_map.get(r['Keyword'], '')
         fill = make_fill(C['PU'] if rel == 'RELEVANT' else C['AM'])
         is_primary = r.get('Primary Keyword','') == 'PRIMARY'
-        act = 'Create new blog post' if r['Intent']=='Informational' else 'Create new service page'
+        act = get_group_action(r, rel)[1]
         rn = ws5.max_row + 1
         for col, v in enumerate([r.get('Theme',''), r.get('Sub-theme',''),
                                   r.get('Content Group',''), '★ PRIMARY' if is_primary else '',
@@ -1704,19 +1798,7 @@ def build_excel(gsc_df, mapped, rel_map, clusters, url_clusters):
     for r in mapped:
         rel = rel_map.get(r['Keyword'],''); url = r['Landing Page']
         rs  = r['Ranking Status']; fs = r['Final Score']; src = r.get('Match Source','')
-        if url and rs=='Ranking p1-10':           opp='Confirmed existing page'
-        elif rs=='Quick win p11-20':              opp='Quick win — optimise'
-        elif rs in['Weak ranking p21-50','Very weak p51-100']: opp='Weak ranking'
-        elif url and 'Claude semantic' in src:    opp='Blog exists — optimise'
-        elif url:                                 opp='Page exists — optimise'
-        elif rel in('RELEVANT','BORDERLINE'):     opp='Business relevant gap'
-        else:                                     opp='True content gap'
-        act = {'Confirmed existing page':'Monitor','Quick win — optimise':'Optimise title + meta + H1',
-               'Weak ranking':'Improve content + internal links',
-               'Page exists — optimise':'Optimise existing page',
-               'Blog exists — optimise':'Update blog title/meta/H1',
-               'Business relevant gap':'Create new blog post' if r['Intent']=='Informational' else 'Create new service page',
-               'True content gap':'Evaluate for new page'}.get(opp,'')
+        opp, act = get_group_action(r, rel)
         pri = {1:'High',2:'High',3:'Medium',4:'Medium',5:'Low',6:'Low'}.get(PORD.get(opp,5),'Low')
         all_items.append({**r,'opp':opp,'act':act,'pri':pri,'po':PORD.get(opp,5)})
     all_items.sort(key=lambda x: (
