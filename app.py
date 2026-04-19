@@ -1432,6 +1432,105 @@ def phase6_cluster(mapped, rel_map, api_key, status_text, progress_bar):
     progress_bar.progress(99)
     return clusters, url_clusters
 
+
+# ── CONTENT GROUP ASSIGNMENT ──────────────────────────────────────────────
+THEME_CODES = {
+    'Furnace / Heating':'FH','AC / Cooling':'AC','Heat Pump':'HP',
+    'Water Heater':'WH','Drain / Sewer':'DS','Plumbing':'PL',
+    'Electrical':'EL','Generator':'GN','Sump Pump':'SP',
+    'Air Quality':'AQ','Water Treatment':'WT','Backflow':'BF',
+    'Geothermal':'GT','Bathroom / Kitchen':'BK','Ventilation / Duct':'VD',
+    'EV Charger':'EV','Commercial':'CM','HVAC General':'HG',
+    'Gas Line':'GL','Ductless Mini Split':'DM','Other':'OT',
+}
+
+def normalise_subthemes(api_key, subthemes, biz_desc, status_text, progress_bar):
+    """Pass 2: merge near-identical sub-theme variants into canonical names."""
+    if not subthemes: return {}
+    status_text.text("Phase 5b: Normalising sub-theme names for consistency...")
+    progress_bar.progress(96)
+    batches = [list(subthemes)[i:i+200] for i in range(0, len(subthemes), 200)]
+    canon_map = {}
+    for batch in batches:
+        prompt = f"""SEO strategist. Normalise these sub-theme names into canonical versions.
+Business: {biz_desc}
+Rules:
+1. Merge variants that mean the SAME content topic into ONE canonical name
+2. Keep topics that would go on DIFFERENT pages separate
+3. Max 4 words, Title Case
+Examples:
+  "Furnace Repair", "Furnace Repair Service", "Gas Furnace Repair" → all become "Furnace Repair"
+  "AC Tune-up", "AC Tune Up", "Air Conditioner Tune-up" → all become "AC Tune-up"
+  "Furnace Repair" vs "Furnace Installation" → KEEP SEPARATE
+  "Furnace Cost Guide" vs "AC Cost Guide" → KEEP SEPARATE
+Return ONLY JSON: {{"input_name": "Canonical Name", ...}}
+Sub-themes: {json.dumps(batch)}"""
+        for attempt in range(3):
+            try:
+                result = call_claude(api_key, prompt, 2000, 50)
+                if isinstance(result, dict): canon_map.update(result)
+                break
+            except Exception:
+                if attempt < 2: time.sleep(2)
+                else:
+                    for s in batch: canon_map[s] = s
+        time.sleep(0.1)
+    for s in subthemes:
+        if s not in canon_map: canon_map[s] = s
+    return canon_map
+
+def assign_content_groups(mapped, api_key, biz_desc, status_text, progress_bar):
+    """
+    Assigns Content Group ID and Primary Keyword flag.
+    Content Group = Theme + normalised Sub-theme + URL (or GAP)
+    Same group = same page. Primary = highest volume keyword per group.
+    """
+    # Step 1: Normalise sub-themes (Pass 2)
+    unique_subs = set(r.get('Sub-theme','') for r in mapped if r.get('Sub-theme',''))
+    canon_map   = normalise_subthemes(api_key, unique_subs, biz_desc, status_text, progress_bar)
+    for r in mapped:
+        r['Sub-theme'] = canon_map.get(r.get('Sub-theme',''), r.get('Sub-theme',''))
+
+    # Step 2: Group keywords by (Theme, Sub-theme, URL)
+    groups = {}
+    for r in mapped:
+        key = (r.get('Theme','Other'), r.get('Sub-theme',''), r.get('Landing Page','') or 'GAP')
+        groups.setdefault(key, []).append(r)
+
+    # Step 3: Assign IDs — sorted by total volume within each theme
+    from collections import defaultdict
+    theme_groups = defaultdict(list)
+    for key, rows in groups.items():
+        theme_groups[key[0]].append((key, sum(r['Volume'] for r in rows)))
+
+    cg_map = {}
+    for theme, glist in theme_groups.items():
+        code = THEME_CODES.get(theme, 'OT')
+        for seq, (key, _) in enumerate(sorted(glist, key=lambda x: -x[1]), 1):
+            cg_map[key] = f"{code}-{seq:03d}"
+
+    # Step 4: Write Content Group to every row
+    for r in mapped:
+        key = (r.get('Theme','Other'), r.get('Sub-theme',''), r.get('Landing Page','') or 'GAP')
+        r['Content Group']   = cg_map.get(key, '')
+        r['Primary Keyword'] = ''
+
+    # Step 5: Flag PRIMARY keyword per group (highest volume, prefer no location qualifiers)
+    LOC_TERMS = ['near me','in buffalo','western ny','buffalo ny','ny ','rochester','amherst',
+                 'cheektowaga','lancaster','tonawanda','depew','clarence','hamburg','west seneca']
+    for key, rows in groups.items():
+        rows_sorted = sorted(
+            rows,
+            key=lambda x: (
+                -x['Volume'],
+                1 if any(t in x['Keyword'].lower() for t in LOC_TERMS) else 0
+            )
+        )
+        rows_sorted[0]['Primary Keyword'] = 'PRIMARY'
+
+    progress_bar.progress(97)
+    return mapped
+
 # ── EXCEL OUTPUT ──────────────────────────────────────────────────────────
 def build_excel(gsc_df, mapped, rel_map, clusters, url_clusters):
     wb = Workbook()
@@ -1452,9 +1551,13 @@ def build_excel(gsc_df, mapped, rel_map, clusters, url_clusters):
 
     # TAB 2: Keyword Mapping (with Theme + Sub-theme)
     ws2 = wb.create_sheet('Keyword Mapping')
-    hdr(ws2, 1, ['Theme','Sub-theme','Keyword','Volume','Your Position','Landing Page','Intent',
-                 'Intent Source','Content Score','GSC Score','Final Score','Match Source','Ranking Status'])
-    for i, r in enumerate(sorted(mapped, key=lambda x: (x.get('Theme',''), x.get('Sub-theme',''), -x.get('Final Score',0)))):
+    hdr(ws2, 1, ['Theme','Sub-theme','Content Group','Primary?','Keyword','Volume',
+                 'Your Position','Landing Page','Intent','Content Score',
+                 'GSC Score','Final Score','Match Source','Ranking Status'])
+    for i, r in enumerate(sorted(mapped, key=lambda x: (
+            x.get('Theme',''), x.get('Sub-theme',''),
+            x.get('Content Group',''), x.get('Primary Keyword','') != 'PRIMARY',
+            -x.get('Volume',0)))):
         row = i+2; url = r['Landing Page']; src = r['Match Source']; rel = rel_map.get(r['Keyword'], '')
         if url and '/blog/' in url:           fill = make_fill(C['BL'])
         elif src == 'GSC fallback':            fill = make_fill(C['YL'])
@@ -1462,23 +1565,27 @@ def build_excel(gsc_df, mapped, rel_map, clusters, url_clusters):
         elif url:                              fill = make_fill(C['GR'])
         elif rel in ('RELEVANT','BORDERLINE'): fill = make_fill(C['PU'])
         else:                                  fill = make_fill(C['WH'])
-        intent_src = 'Claude' if r.get('_intent_source','') == 'claude' else 'Rule-based'
-        vals = [r.get('Theme',''), r.get('Sub-theme',''), r['Keyword'], r['Volume'],
-                r['Your Position'], url or '', r['Intent'], intent_src,
+        is_primary = r.get('Primary Keyword','') == 'PRIMARY'
+        vals = [r.get('Theme',''), r.get('Sub-theme',''), r.get('Content Group',''),
+                '★ PRIMARY' if is_primary else '', r['Keyword'], r['Volume'],
+                r['Your Position'], url or '', r['Intent'],
                 r['Content Score'], r['GSC Score'], r['Final Score'], src or '', r['Ranking Status']]
         for col, v in enumerate(vals, 1):
-            c = ws2.cell(row=row, column=col, value=v); c.fill = fill; c.font = lf if col==6 else bf
-    cw(ws2, [22,28,48,12,14,62,15,14,14,12,12,26,18]); ws2.freeze_panes = 'A2'
+            c = ws2.cell(row=row, column=col, value=v)
+            c.fill = fill
+            c.font = Font(size=10, bold=is_primary, color='0563C1' if col==8 else '000000')
+    cw(ws2, [22,28,12,10,48,12,14,62,15,14,12,12,26,18]); ws2.freeze_panes = 'A2'
 
-    # TAB 3: Opportunity Classification (with Theme + Sub-theme)
     ws3 = wb.create_sheet('Opportunity Classification')
-    hdr(ws3, 1, ['Theme','Sub-theme','Keyword','Volume','Your Position','Landing Page',
-                 'Intent','Final Score','Opportunity Type','Action'])
+    hdr(ws3, 1, ['Theme','Sub-theme','Content Group','Primary?','Keyword','Volume',
+                 'Your Position','Landing Page','Intent','Final Score','Opportunity Type','Action'])
     OPP_F = {'Confirmed existing page': make_fill(C['GR']), 'Quick win — optimise': make_fill(C['DGR']),
              'Weak ranking': make_fill(C['YL']), 'Page exists — optimise': make_fill(C['BL']),
              'Blog exists — optimise': make_fill(C['OR']), 'Business relevant gap': make_fill(C['PU']),
              'True content gap': make_fill(C['RD'])}
-    for r in sorted(mapped, key=lambda x: (x.get('Theme',''), x.get('Sub-theme',''), -x.get('Volume',0))):
+    for r in sorted(mapped, key=lambda x: (
+            x.get('Theme',''), x.get('Sub-theme',''), x.get('Content Group',''),
+            x.get('Primary Keyword','') != 'PRIMARY', -x.get('Volume',0))):
         rel = rel_map.get(r['Keyword'], ''); url = r['Landing Page']
         rs  = r['Ranking Status']; fs = r['Final Score']; src = r.get('Match Source', '')
         if url and rs == 'Ranking p1-10':         opp = 'Confirmed existing page'; act = 'Monitor — already ranking well'
@@ -1492,11 +1599,16 @@ def build_excel(gsc_df, mapped, rel_map, clusters, url_clusters):
             act = 'Create new blog post' if r['Intent']=='Informational' else 'Create new service page'
         else:                                      opp = 'True content gap'; act = 'Evaluate — may need new page'
         fill = OPP_F.get(opp, make_fill(C['WH']))
+        is_primary = r.get('Primary Keyword','') == 'PRIMARY'
         rn = ws3.max_row + 1
-        for col, v in enumerate([r.get('Theme',''), r.get('Sub-theme',''), r['Keyword'], r['Volume'],
-                                  r['Your Position'], url or '', r['Intent'], fs, opp, act], 1):
-            c = ws3.cell(row=rn, column=col, value=v); c.fill = fill; c.font = lf if col==6 else bf
-    cw(ws3, [22,28,48,12,14,62,15,12,28,48]); ws3.freeze_panes = 'A2'
+        for col, v in enumerate([r.get('Theme',''), r.get('Sub-theme',''),
+                                  r.get('Content Group',''), '★ PRIMARY' if is_primary else '',
+                                  r['Keyword'], r['Volume'], r['Your Position'],
+                                  url or '', r['Intent'], fs, opp, act], 1):
+            c = ws3.cell(row=rn, column=col, value=v)
+            c.fill = fill
+            c.font = Font(size=10, bold=is_primary, color='0563C1' if col==8 else '000000')
+    cw(ws3, [22,28,12,10,48,12,14,62,15,12,28,48]); ws3.freeze_panes = 'A2'
 
     # TAB 4: Keyword Clusters
     ws4 = wb.create_sheet('Keyword Clusters')
@@ -1534,21 +1646,26 @@ def build_excel(gsc_df, mapped, rel_map, clusters, url_clusters):
         r += 1
     cw(ws4, [22,28,60,15,42,15,65,14,12,48]); ws4.freeze_panes = 'A5'
 
-    # TAB 5: Business Relevant Gaps (with Theme + Sub-theme)
+    # TAB 5: Business Relevant Gaps
     ws5 = wb.create_sheet('Business Relevant Gaps')
-    hdr(ws5, 1, ['Theme','Sub-theme','Keyword','Volume','Intent','Relevance','Action Needed'])
+    hdr(ws5, 1, ['Theme','Sub-theme','Content Group','Primary?','Keyword','Volume','Intent','Relevance','Action Needed'])
     gaps = sorted([r for r in mapped if not r['Landing Page']
                    and rel_map.get(r['Keyword'], '') in ('RELEVANT','BORDERLINE')],
-                  key=lambda x: (x.get('Theme',''), x.get('Sub-theme',''), -x.get('Volume',0)))
+                  key=lambda x: (x.get('Theme',''), x.get('Sub-theme',''),
+                                 x.get('Content Group',''),
+                                 x.get('Primary Keyword','') != 'PRIMARY', -x.get('Volume',0)))
     for r in gaps:
         rel = rel_map.get(r['Keyword'], '')
         fill = make_fill(C['PU'] if rel == 'RELEVANT' else C['AM'])
+        is_primary = r.get('Primary Keyword','') == 'PRIMARY'
         act = 'Create new blog post' if r['Intent']=='Informational' else 'Create new service page'
         rn = ws5.max_row + 1
-        for col, v in enumerate([r.get('Theme',''), r.get('Sub-theme',''), r['Keyword'],
-                                  r['Volume'], r['Intent'], rel, act], 1):
-            c = ws5.cell(row=rn, column=col, value=v); c.fill = fill; c.font = bf
-    cw(ws5, [22,28,50,12,15,14,28]); ws5.freeze_panes = 'A2'
+        for col, v in enumerate([r.get('Theme',''), r.get('Sub-theme',''),
+                                  r.get('Content Group',''), '★ PRIMARY' if is_primary else '',
+                                  r['Keyword'], r['Volume'], r['Intent'], rel, act], 1):
+            c = ws5.cell(row=rn, column=col, value=v)
+            c.fill = fill; c.font = Font(size=10, bold=is_primary)
+    cw(ws5, [22,28,12,10,50,12,15,14,28]); ws5.freeze_panes = 'A2'
 
     # TAB 6: Priority Roadmap (with Theme + Sub-theme)
     ws6 = wb.create_sheet('Priority Roadmap')
@@ -1573,9 +1690,9 @@ def build_excel(gsc_df, mapped, rel_map, clusters, url_clusters):
             c = ws6.cell(row=r, column=col, value=v); c.fill = fill; c.font = Font(size=10, bold=(col==5))
     dr = len(summary) + 7
     ws6.cell(row=dr, column=1, value='Detailed Action List — sorted by Theme > Sub-theme > Priority').font = Font(bold=True, size=12, color='0F6E56')
-    ws6.merge_cells(start_row=dr, start_column=1, end_row=dr, end_column=10); dr += 1
-    hdr(ws6, dr, ['Theme','Sub-theme','Keyword','Volume','Your Position','Intent',
-                  'Final Score','Opportunity','Action','Priority']); dr += 1
+    ws6.merge_cells(start_row=dr, start_column=1, end_row=dr, end_column=11); dr += 1
+    hdr(ws6, dr, ['Theme','Sub-theme','Content Group','Primary?','Keyword','Volume',
+                  'Your Position','Intent','Final Score','Opportunity','Action']); dr += 1
     PORD = {'Quick win — optimise':1,'Weak ranking':2,'Page exists — optimise':3,
             'Blog exists — optimise':3,'Business relevant gap':4,'True content gap':5,
             'Confirmed existing page':6}
@@ -1602,16 +1719,25 @@ def build_excel(gsc_df, mapped, rel_map, clusters, url_clusters):
                'True content gap':'Evaluate for new page'}.get(opp,'')
         pri = {1:'High',2:'High',3:'Medium',4:'Medium',5:'Low',6:'Low'}.get(PORD.get(opp,5),'Low')
         all_items.append({**r,'opp':opp,'act':act,'pri':pri,'po':PORD.get(opp,5)})
-    # Sort by Theme → Sub-theme → Priority → Volume
-    all_items.sort(key=lambda x: (x.get('Theme','zzz'), x.get('Sub-theme','zzz'), x['po'], -x['Volume']))
+    all_items.sort(key=lambda x: (
+        x.get('Theme','zzz'), x.get('Sub-theme','zzz'),
+        x.get('Content Group','zzz'),
+        x.get('Primary Keyword','') != 'PRIMARY',
+        x['po'], -x['Volume']))
     for item in all_items:
         fill = AF.get(item['opp'], make_fill(C['WH']))
-        for col, v in enumerate([item.get('Theme',''), item.get('Sub-theme',''), item['Keyword'],
-                                  item['Volume'], item['Your Position'], item['Intent'],
-                                  item['Final Score'], item['opp'], item['act'], item['pri']], 1):
-            c = ws6.cell(row=dr, column=col, value=v); c.fill = fill; c.font = Font(size=10, bold=(col==10))
+        is_primary = item.get('Primary Keyword','') == 'PRIMARY'
+        for col, v in enumerate([item.get('Theme',''), item.get('Sub-theme',''),
+                                  item.get('Content Group',''),
+                                  '★ PRIMARY' if is_primary else '',
+                                  item['Keyword'], item['Volume'], item['Your Position'],
+                                  item['Intent'], item['Final Score'],
+                                  item['opp'], item['act']], 1):
+            c = ws6.cell(row=dr, column=col, value=v)
+            c.fill = fill
+            c.font = Font(size=10, bold=is_primary)
         dr += 1
-    cw(ws6, [22,28,48,12,14,15,12,28,42,10]); ws6.freeze_panes = f'A{len(summary)+10}'
+    cw(ws6, [22,28,12,10,48,12,14,15,12,28,42]); ws6.freeze_panes = f'A{len(summary)+10}'
     buf = io.BytesIO(); wb.save(buf); buf.seek(0); return buf
 
 # ── UI ────────────────────────────────────────────────────────────────────
@@ -1740,6 +1866,9 @@ if st.button("🚀 Run Full Analysis", disabled=bool(issues), use_container_widt
 
         # Phase 6: Clustering
         clusters, url_clusters = phase6_cluster(mapped, rel_map, api_key, status_text, progress_bar)
+
+        # ── Content Group Assignment ──────────────────────────────────────
+        mapped = assign_content_groups(mapped, api_key, biz_desc, status_text, progress_bar)
 
         # ── GUARANTEED ZERO BLANK SUB-THEMES ─────────────────────────────
         # After all Claude phases, sweep every row and fill any remaining blanks.
