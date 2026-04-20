@@ -847,87 +847,58 @@ def run_batches(api_key, batches, make_prompt, parse_result, fallback_fn,
         time.sleep(0.1)
     return out
 
-def claude_intent(api_key, ambiguous_kws, biz_desc, status_text, progress_bar, p0, p1):
-    """Dedicated intent classification — one task only, no mixing."""
-    batches = [ambiguous_kws[i:i+100] for i in range(0, len(ambiguous_kws), 100)]
-    def make_prompt(batch):
-        return f"""You are classifying search intent for a plumbing and HVAC company.
-
-INFORMATIONAL = searcher wants to learn, diagnose, research, or understand something.
-They are NOT ready to hire yet. Examples: "ac blows warm air", "furnace smell",
-"water heater not hot enough", "how long does a furnace last", "what is radiant heat"
-
-TRANSACTIONAL = searcher wants to hire a company or book a service.
-They ARE ready to take action. Examples: "furnace repair service", "plumber",
-"AC installation", "emergency drain cleaning"
-
-Business: {biz_desc}
-
-Return ONLY JSON: {{"keyword": "Informational"}} or {{"keyword": "Transactional"}}
-No other values allowed.
-
-Keywords:
-{json.dumps(batch)}"""
-    return run_batches(
-        api_key, batches,
-        make_prompt=make_prompt,
-        parse_result=lambda r, b: r if isinstance(r, dict) else {k: 'Transactional' for k in b},
-        fallback_fn=lambda b: {k: 'Transactional' for k in b},
-        status_prefix="Claude — intent classification",
-        status_text=status_text, progress_bar=progress_bar, p0=p0, p1=p1,
-        max_tokens=1200, timeout=45
-    )
-
-def claude_theme_subtheme(api_key, url_meta_list, biz_desc, status_text, progress_bar, p0, p1):
+def claude_intent(api_key, keywords, biz_desc, status_text, progress_bar, p0, p1):
     """
-    Assign Theme + Sub-theme using full page metadata (URL + Title + Meta + H1).
-    Works for any industry — business description provides the service context.
-    url_meta_list: list of dicts {url, title, meta, h1}
+    Claude classifies intent for every non-obvious keyword.
+    No Ambiguous — must decide Informational or Transactional.
+    Context-aware: understands that some keywords without question words
+    are still informational (e.g. "ac unit common problems", "furnace lifespan").
     """
-    batches = [url_meta_list[i:i+40] for i in range(0, len(url_meta_list), 40)]
+    batches = [keywords[i:i+120] for i in range(0, len(keywords), 120)]
     def make_prompt(batch):
-        items = json.dumps([{
-            "url":   p["url"],
-            "title": p["title"][:120],
-            "meta":  p["meta"][:180],
-            "h1":    p["h1"][:80]
-        } for p in batch])
-        return f"""You are an SEO strategist. For each page, assign Theme and Sub-theme
-based on the URL, Title, Meta Description and H1.
+        return f"""You are an expert SEO analyst. Classify each keyword as either
+"Informational" or "Transactional" based on what a real searcher wants.
 
 Business context: {biz_desc}
 
-Rules:
-1. Theme = top-level service category relevant to this business
-2. Sub-theme = specific topic this ONE page covers (precise enough that
-   it represents exactly one piece of content)
-3. Use Title, Meta and H1 as primary signals — they are more reliable than the URL
-4. If Title/H1 says "Furnace Repair" — Sub-theme is "Furnace Repair" regardless of URL
-5. Be consistent — same type of page should get same Sub-theme across the site
+Informational = searcher wants to LEARN, RESEARCH, or DIAGNOSE
+  - Questions and educational queries
+  - Cost/pricing research ("how much does X cost", "X pricing")
+  - Troubleshooting ("X not working", "X making noise")
+  - Comparisons, guides, tips, explanations
+  - Even without question words: "furnace lifespan", "ac common problems"
 
-Return ONLY JSON keyed by URL:
-{{"url": {{"theme": "Theme Name", "subtheme": "Specific Sub-theme"}},...}}
+Transactional = searcher wants to HIRE, BUY, or GET a SERVICE
+  - Service requests ("X repair", "X installation service")
+  - Finding a provider ("X company", "X contractor", "X specialist")
+  - Location-based service ("plumber in chicago", "ac repair rochester")
+  - Product purchases
 
-Pages:
-{items}"""
+IMPORTANT: Do NOT assume "near me" is required for Transactional.
+"furnace repair" alone is Transactional — searcher wants to hire.
+"furnace repair cost" is Informational — searcher is researching.
+
+Return ONLY valid JSON: {{"keyword": "Informational" or "Transactional", ...}}
+
+Keywords: {json.dumps(batch)}"""
+
     def parse_result(r, batch):
-        out = {}
-        for p in batch:
-            url = p["url"]
-            if url in r and isinstance(r[url], dict):
-                out[url] = (r[url].get('theme',''), r[url].get('subtheme',''))
-            else:
-                out[url] = ('','')
+        out = {{}}
+        for kw in batch:
+            v = r.get(kw, '')
+            out[kw] = v if v in ('Informational','Transactional') else 'Transactional'
         return out
+
     return run_batches(
         api_key, batches,
         make_prompt=make_prompt,
         parse_result=parse_result,
-        fallback_fn=lambda b: {p["url"]: ('','') for p in b},
-        status_prefix="Claude — theme/sub-theme",
+        fallback_fn=lambda b: {{k: 'Transactional' for k in b}},
+        status_prefix="Claude — intent classification",
         status_text=status_text, progress_bar=progress_bar, p0=p0, p1=p1,
-        max_tokens=1500, timeout=50
+        max_tokens=1500, timeout=45
     )
+
 
 def claude_relevance(api_key, keywords, biz_desc, excl_str, status_text, progress_bar, p0, p1):
     batches = [keywords[i:i+100] for i in range(0, len(keywords), 100)]
@@ -944,57 +915,6 @@ Keywords: {json.dumps(batch)}"""
         parse_result=lambda r, b: r if isinstance(r, dict) else {k: 'BORDERLINE' for k in b},
         fallback_fn=lambda b: {k: 'BORDERLINE' for k in b},
         status_prefix="Claude — business relevance",
-        status_text=status_text, progress_bar=progress_bar, p0=p0, p1=p1,
-        max_tokens=1200, timeout=45
-    )
-
-def claude_validate_blogs(api_key, kw_blog_pairs, status_text, progress_bar, p0, p1):
-    batches = [kw_blog_pairs[i:i+50] for i in range(0, len(kw_blog_pairs), 50)]
-    def make_prompt(batch):
-        return f"""SEO analyst. Does the blog post clearly match the keyword intent?
-YES = blog directly answers what the searcher wants to know.
-NO = blog topic is different from keyword intent.
-Return ONLY JSON: {{"keyword":"YES/NO",...}}
-Pairs: {json.dumps([{"keyword":k,"blog":s} for k,s in batch])}"""
-    def parse_result(r, batch):
-        return {k: r.get(k, 'YES') for k, s in batch}
-    return run_batches(
-        api_key, batches,
-        make_prompt=make_prompt,
-        parse_result=parse_result,
-        fallback_fn=lambda b: {k: 'YES' for k, s in b},
-        status_prefix="Claude — blog validation",
-        status_text=status_text, progress_bar=progress_bar, p0=p0, p1=p1,
-        max_tokens=800, timeout=40
-    )
-
-def claude_match_blogs(api_key, keywords, existing_blogs, url_df, status_text, progress_bar, p0, p1):
-    """FIX C: Semantically match unmapped informational kws to existing blogs.
-    Uses blog Title + H1 as context — much more accurate than slug alone."""
-    batches = [keywords[i:i+80] for i in range(0, len(keywords), 80)]
-    # Build blog context: slug → title + h1
-    blog_ctx = {}
-    for _, row in url_df.iterrows():
-        url = get_url(row)
-        if url and '/blog/' in url.lower():
-            slug  = url.split('/blog/')[-1].strip('/')
-            title = str(row.get('title_raw', row.get('Title 1','')) or '')
-            h1    = str(row.get('h1_raw', row.get('H1-1','')) or '')
-            blog_ctx[slug] = re.sub(r'\s*[\|\-–].*$','',title).strip() or h1 or slug
-    blog_list = json.dumps([{"slug": s, "topic": t} for s, t in list(blog_ctx.items())[:60]])
-    def make_prompt(batch):
-        return f"""SEO analyst. Match each keyword to the best existing blog post, or null.
-Only return a slug if the blog CLEARLY covers that keyword topic (90%+ relevance).
-Use the blog topic description to judge relevance — not just the slug.
-Return ONLY JSON: {{"keyword":"slug_or_null",...}}
-Available blogs: {blog_list}
-Keywords: {json.dumps(batch)}"""
-    return run_batches(
-        api_key, batches,
-        make_prompt=make_prompt,
-        parse_result=lambda r, b: {k: r.get(k) for k in b},
-        fallback_fn=lambda b: {k: None for k in b},
-        status_prefix="Claude — blog semantic matching",
         status_text=status_text, progress_bar=progress_bar, p0=p0, p1=p1,
         max_tokens=1200, timeout=45
     )
@@ -1249,92 +1169,194 @@ def phase1_gsc(gsc_df, sf_df, weights, status_text, progress_bar):
     return pd.DataFrame(validated), url_df, dedup, stop, hp_slugs
 
 # ── PHASE 2: KEYWORD MAPPING ──────────────────────────────────────────────
+def claude_validate_match(api_key, kw_candidates, biz_desc,
+                          status_text, progress_bar, p0, p1):
+    """
+    Claude validates whether a candidate URL genuinely covers a keyword.
+    Input: list of (keyword, [candidates]) where each candidate has url/title/h1/meta.
+    Output: {keyword: {"url": best_url_or_null, "confidence": "High"/"Medium"/null}}
+
+    High:   page directly covers this keyword topic, searcher would be satisfied
+    Medium: page covers the parent topic, keyword is a natural subtopic
+    null:   no genuine match — even if TF-IDF score was high
+    """
+    batches = [kw_candidates[i:i+50] for i in range(0, len(kw_candidates), 50)]
+
+    def make_prompt(batch):
+        items = []
+        for kw, candidates in batch:
+            items.append({
+                "keyword": kw,
+                "candidates": [
+                    {"url": c["url"], "title": c["title"],
+                     "h1": c["h1"], "meta": c["meta"][:120]}
+                    for c in candidates
+                ]
+            })
+        return f"""You are a senior SEO strategist. For each keyword, decide if any
+candidate page genuinely covers that keyword's topic.
+
+Business: {biz_desc}
+
+For each keyword evaluate BOTH:
+1. Does the page ALREADY cover this keyword's topic?
+2. Would a searcher typing this keyword be satisfied landing on this page?
+
+Use ONLY the title, H1 and meta description to judge — not the URL slug.
+
+Confidence levels:
+  "High":   Page directly and specifically covers this keyword.
+             e.g. keyword "furnace repair near me" + title "Furnace Repair Services" → High
+  "Medium": Page covers the parent topic and keyword is a natural subtopic.
+             e.g. keyword "furnace tune-up cost" + title "Furnace Maintenance Services" → Medium
+  null:     No genuine match. TF-IDF may have scored it but topic is different.
+             e.g. keyword "ac troubleshooting" + title "Energy Efficient Lighting" → null
+
+Return ONLY valid JSON:
+{{
+  "keyword": {{
+    "url": "matched_url_or_null",
+    "confidence": "High" or "Medium" or null
+  }},
+  ...
+}}
+
+Items to evaluate:
+{json.dumps(items)}"""
+
+    def parse_result(r, batch):
+        out = {}
+        for kw, _ in batch:
+            val = r.get(kw, {})
+            if isinstance(val, dict) and val.get('url') and val.get('confidence') in ('High','Medium'):
+                out[kw] = {"url": val["url"], "confidence": val["confidence"]}
+            else:
+                out[kw] = {"url": None, "confidence": None}
+        return out
+
+    return run_batches(
+        api_key, batches,
+        make_prompt=make_prompt,
+        parse_result=parse_result,
+        fallback_fn=lambda b: {kw: {"url": None, "confidence": None} for kw, _ in b},
+        status_prefix="Claude — URL match validation",
+        status_text=status_text, progress_bar=progress_bar, p0=p0, p1=p1,
+        max_tokens=2000, timeout=55
+    )
+
 def phase2_map(sem_df, url_df, gsc_dedup, gsc_val_df, weights, threshold,
                your_col, intent_map, hp_slugs, url_theme_map,
                status_text, progress_bar):
-    status_text.text("Phase 2: Building TF-IDF models...")
+    """
+    Phase 2: Two-step keyword-to-URL mapping.
+
+    Step A — TF-IDF shortlist (fast, cheap):
+      Finds top 3 candidate URLs per keyword above 0.10 threshold.
+      Lower threshold than before — Claude decides quality, not score.
+      GSC URL added as Candidate A (strongest prior signal).
+
+    Step B — Claude validates (accurate, reliable):
+      Claude reads keyword + each candidate Title + H1 + Meta.
+      Returns best match URL + confidence (High/Medium) or null.
+      Only High/Medium matches are kept — no weak matches ever shown.
+    """
+    status_text.text("Phase 2: Building TF-IDF shortlists...")
     progress_bar.progress(24)
+
     svc_df  = url_df[url_df['ptype'] == 'service'].reset_index(drop=True)
     blog_df = url_df[url_df['ptype'] == 'blog'].reset_index(drop=True)
-    # Auto-detect homepage URLs — slugs made entirely of stop words are generic landing pages
+
+    # Homepage detection
     hp_urls = set()
-    for _, r in url_df.iterrows():
-        u = get_url(r)
+    for _, row in url_df.iterrows():
+        u = get_url(row)
         slug = re.sub(r'https?://[^/]+', '', u).strip('/')
         slug_words = set(re.split(r'[/\-_]', slug.lower())) - {''}
-        # Homepage if slug is empty OR all slug words are stop/city/brand words
         if not slug_words or slug_words.issubset(hp_slugs | {''}):
             hp_urls.add(u.lower().strip())
+
     def get_url_theme(url):
-        """Get theme for a URL from Phase 0 Claude output."""
         if not url or not url_theme_map: return ''
         slug = re.sub(r'https?://[^/]+', '', url.lower()).strip('/')
         if slug in url_theme_map: return url_theme_map[slug]
         for k, v in url_theme_map.items():
             if slug.endswith(k) or k.endswith(slug): return v
         return ''
-    gsc_status = dict(zip(gsc_val_df['Query'].str.lower().str.strip(), gsc_val_df['Mapping Status']))
+
+    # Build URL metadata lookup for Claude validation
+    url_meta_lookup = {}
+    for _, row in url_df.iterrows():
+        u = get_url(row)
+        if not u: continue
+        title = str(row.get('title_raw', row.get('Title 1','')) or '').strip()
+        h1    = str(row.get('h1_raw',    row.get('H1-1',''))    or '').strip()
+        meta  = str(row.get('meta_raw',  row.get('Meta Description 1','')) or '').strip()
+        title_clean = re.sub(r'\s*[\|\-–]\s*.{0,40}$', '', title).strip()
+        url_meta_lookup[u.lower().strip()] = {
+            'url':   u,
+            'title': title_clean[:120],
+            'h1':    h1[:80],
+            'meta':  meta[:160],
+        }
+
+    gsc_status = dict(zip(gsc_val_df['Query'].str.lower().str.strip(),
+                          gsc_val_df['Mapping Status']))
     keywords = sem_df['Keyword'].fillna('').tolist()
     volumes  = sem_df['Volume'].fillna(0).tolist()
     your_pos = sem_df[your_col].fillna('').tolist() if your_col in sem_df.columns else [''] * len(keywords)
     cleaned  = [clean_kw(k) for k in keywords]
+
+    # TF-IDF models
     def build_sims(df):
         v = TfidfVectorizer(ngram_range=(1,3), min_df=1, sublinear_tf=True)
         v.fit(df['content'].tolist() + cleaned)
         return cosine_similarity(v.transform(cleaned), v.transform(df['content']))
+
     ss = build_sims(svc_df)
     bs = build_sims(blog_df)
-    progress_bar.progress(40)
-    status_text.text("Phase 2: Mapping keywords to pages...")
-    results = []
+    progress_bar.progress(38)
+
+    # ── Step A: TF-IDF shortlist ─────────────────────────────────────────
+    SHORTLIST_THRESHOLD = 0.10   # low — Claude decides quality not score
+    MAX_CANDIDATES      = 3      # top N per keyword
+
+    status_text.text("Phase 2: Building candidate shortlists...")
+    kw_candidates = []   # list of (keyword, [candidates])
+    kw_meta       = []   # parallel list of basic metadata
+
     for i, kw in enumerate(keywords):
         if i % 500 == 0:
-            progress_bar.progress(min(40 + int((i / len(keywords)) * 25), 64))
-            status_text.text(f"Phase 2: Mapping {i:,}/{len(keywords):,} keywords...")
-        kl = kw.lower().strip()
+            progress_bar.progress(min(38 + int((i / len(keywords)) * 20), 57))
+            status_text.text(f"Phase 2: Shortlisting {i:,}/{len(keywords):,}...")
+
+        kl     = kw.lower().strip()
         intent = intent_map.get(kl, intent_map.get(kw.lower(), 'Transactional'))
-        kc = cat_kw(kw)
-        chosen = ''; source = ''; cs = 0.0; gs = 0.0
-        if intent == 'Informational':
-            for idx in np.argsort(bs[i])[::-1]:
-                s = float(bs[i][idx])
-                if s < threshold: break
-                url = get_url(blog_df.iloc[idx])
-                uc  = blog_df.iloc[idx]['cats']
-                kw_th = classify_theme(kw); url_th = get_url_theme(url)
-                if is_compat(kc, uc, kw, url) or is_compat_universal(kw_th, url_th):
-                    chosen = url; cs = round(s, 4); source = 'Content match (blog)'; break
-        else:
-            hp_fb = None
-            for idx in np.argsort(ss[i])[::-1]:
-                s = float(ss[i][idx])
-                if s < threshold: break
-                url = get_url(svc_df.iloc[idx])
-                uc  = svc_df.iloc[idx]['cats']
-                kw_th = classify_theme(kw); url_th = get_url_theme(url)
-                if is_compat(kc, uc, kw, url) or is_compat_universal(kw_th, url_th):
-                    if url.lower().strip() in hp_urls:
-                        if hp_fb is None: hp_fb = (url, round(s, 4))
-                        continue
-                    chosen = url; cs = round(s, 4); source = 'Content match'; break
-            if not chosen and hp_fb:
-                chosen, cs = hp_fb; source = 'Content match (homepage fallback)'
+
+        candidates = []
+
+        # Candidate A: GSC URL (strongest prior)
         gd  = gsc_dedup.get(kl, {})
         gu  = gd.get('url', '')
-        guc = cat_url(gu) if gu else frozenset()
         gst = gsc_status.get(kl, '')
-        kw_th_g = classify_theme(kw); url_th_g = get_url_theme(gu)
-        gv  = gu and not is_excl(gu) and (
-              is_compat(kc, guc, kw, gu) or is_compat_universal(kw_th_g, url_th_g))
-        if gv:
-            if intent == 'Informational' and '/blog/' not in gu.lower(): gv = False
-            if gst == 'Suspicious' and not chosen: gv = False
-        if gv and chosen and gu.lower().strip() == chosen.lower().strip():
-            gs = 0.40; source = source.replace('Content match', 'Content + GSC confirmed')
-        elif gv and not chosen:
-            if gst in ('Confirmed', 'Plausible'):
-                chosen = gu; gs = 0.40; source = 'GSC fallback'
-        fs = round(cs * 0.7 + gs * 0.3, 4)
+        if gu and not is_excl(gu) and gst in ('Confirmed','Plausible'):
+            meta = url_meta_lookup.get(gu.lower().strip())
+            if meta:
+                candidates.append(meta)
+
+        # Candidates from TF-IDF — use both service and blog pools
+        pools = [(bs, blog_df), (ss, svc_df)]
+        for sim_matrix, df in pools:
+            for idx in np.argsort(sim_matrix[i])[::-1]:
+                if len(candidates) >= MAX_CANDIDATES + 1: break
+                s = float(sim_matrix[i][idx])
+                if s < SHORTLIST_THRESHOLD: break
+                url = get_url(df.iloc[idx])
+                if url.lower().strip() in hp_urls: continue
+                meta = url_meta_lookup.get(url.lower().strip())
+                if meta and not any(c['url'] == url for c in candidates):
+                    candidates.append(meta)
+
+        # Determine ranking status from Semrush position
         rp = str(your_pos[i]).strip()
         try: pn = float(rp)
         except: pn = None
@@ -1344,73 +1366,142 @@ def phase2_map(sem_df, url_df, gsc_dedup, gsc_val_df, weights, threshold,
             elif pn <= 50:  rs = 'Weak ranking p21-50'
             else:           rs = 'Very weak p51-100'
         else: rs = 'Not ranking'
-        results.append({'Keyword': kw, 'Volume': int(volumes[i]) if volumes[i] else 0,
-                        'Your Position': rp or 'N/A', 'Landing Page': chosen,
-                        'Intent': intent, 'Content Score': cs, 'GSC Score': gs,
-                        'Final Score': fs, 'Match Source': source, 'Ranking Status': rs,
-                        '_cats': kc})
-    progress_bar.progress(65)
+
+        kw_candidates.append((kw, candidates))
+        kw_meta.append({
+            'Keyword': kw, 'Volume': int(volumes[i]) if volumes[i] else 0,
+            'Your Position': rp or 'N/A', 'Intent': intent,
+            'Ranking Status': rs, '_gsc_url': gu, '_gsc_status': gst
+        })
+
+    progress_bar.progress(58)
+
+    # ── Step B: Claude validates candidates ─────────────────────────────
+    # Only send keywords that have at least one candidate
+    to_validate = [(kw, cands) for kw, cands in kw_candidates if cands]
+    status_text.text(f"Phase 2: Claude validating {len(to_validate):,} keyword-URL matches...")
+
+    validated = {}
+    if to_validate:
+        validated = claude_validate_match(
+            api_key, to_validate, biz_desc,
+            status_text, progress_bar, 58, 78
+        )
+
+    # ── Build final results ──────────────────────────────────────────────
+    progress_bar.progress(78)
+    results = []
+    for i, km in enumerate(kw_meta):
+        kw      = km['Keyword']
+        match   = validated.get(kw, {"url": None, "confidence": None})
+        chosen  = match.get('url') or ''
+        conf    = match.get('confidence')
+
+        # Score based on confidence
+        if conf == 'High':
+            cs = 0.85; source = 'Claude — High confidence'
+        elif conf == 'Medium':
+            cs = 0.55; source = 'Claude — Medium confidence'
+        else:
+            cs = 0.0;  source = ''
+            chosen = ''
+
+        # GSC score boost if GSC URL matches Claude match
+        gs = 0.0
+        gu = km.get('_gsc_url','')
+        if chosen and gu and chosen.lower().strip() == gu.lower().strip():
+            gs = 0.30; source += ' + GSC confirmed'
+        elif not chosen and gu and km.get('_gsc_status') in ('Confirmed','Plausible'):
+            # GSC has a URL but Claude rejected it — treat as no match
+            pass
+
+        fs = round(cs * 0.7 + gs * 0.3, 4)
+
+        results.append({
+            'Keyword':       kw,
+            'Volume':        km['Volume'],
+            'Your Position': km['Your Position'],
+            'Landing Page':  chosen,
+            'Intent':        km['Intent'],
+            'Content Score': round(cs, 4),
+            'GSC Score':     gs,
+            'Final Score':   fs,
+            'Match Source':  source,
+            'Ranking Status':km['Ranking Status'],
+            '_cats':         frozenset(),   # kept for compatibility, no longer used for filtering
+        })
+
+    progress_bar.progress(80)
     return results
+
 
 # ── PHASE 3: INTENT CLASSIFICATION ───────────────────────────────────────
 def phase3_intent(keywords, api_key, biz_desc, status_text, progress_bar):
+    """
+    Claude-first intent classification.
+    Rules only catch 100% obvious signals — everything else goes to Claude.
+    Claude re-examines even rule-classified Transactional keywords that may be
+    informational in context. No "Ambiguous" category — Claude must decide.
+    """
     status_text.text("Phase 3: Classifying keyword intent...")
     progress_bar.progress(66)
-    intent_map = {}
-    ambiguous = []
+
+    intent_map  = {}
+    for_claude  = []
+
     for kw in keywords:
-        result = classify_intent_rules(kw)
-        if result == 'Ambiguous':
-            ambiguous.append(kw)
+        kl = kw.lower().strip()
+        # 100% obvious informational: starts with question word
+        if re.match(r'^(how|why|what|where|when|which|is|are|can|do|does|will|should|who)', kl):
+            intent_map[kl] = 'Informational'
+        # 100% obvious transactional: clear hire/buy signals
+        elif any(t in kl for t in ['near me', 'near by', 'close to me', 'emergency ',
+                                    '24 hour', '24/7', 'same day', 'hire a', 'hire an',
+                                    'book a', 'schedule a', 'call a', 'find a']):
+            intent_map[kl] = 'Transactional'
         else:
-            intent_map[kw.lower()] = result
+            # Everything else → Claude decides
+            for_claude.append(kw)
+
     progress_bar.progress(68)
-    status_text.text(f"Phase 3: Rule-based classified {len(intent_map):,} keywords. Sending {len(ambiguous):,} ambiguous to Claude...")
-    if ambiguous:
-        claude_intents = claude_intent(api_key, ambiguous, biz_desc, status_text, progress_bar, 68, 75)
+    status_text.text(f"Phase 3: {len(intent_map):,} rule-classified. "
+                     f"Sending {len(for_claude):,} to Claude for intent judgment...")
+
+    if for_claude:
+        # Use existing claude_intent with updated prompt context
+        claude_intents = claude_intent(api_key, for_claude, biz_desc,
+                                       status_text, progress_bar, 68, 75)
         for kw, intent in claude_intents.items():
-            intent_map[kw.lower()] = intent if intent in ('Informational','Transactional') else 'Transactional'
+            val = intent if intent in ('Informational', 'Transactional') else 'Transactional'
+            intent_map[kw.lower()] = val
+
     progress_bar.progress(75)
     return intent_map
 
 # ── PHASE 4: BUSINESS RELEVANCE + BLOG FIXES ──────────────────────────────
 def phase4_relevance_blogs(mapped, url_df, api_key, biz_desc, excl_str, status_text, progress_bar):
-    progress_bar.progress(76)
-    # Fix B: validate weak blog matches
-    weak_blog = [(r['Keyword'], r['Landing Page'].split('/blog/')[-1].strip('/'))
-                 for r in mapped
-                 if r['Landing Page'] and '/blog/' in r['Landing Page']
-                 and r['Content Score'] < 0.15 and r['Match Source'] != 'GSC fallback']
-    blog_valid = {}
-    if weak_blog:
-        blog_valid = claude_validate_blogs(api_key, weak_blog, status_text, progress_bar, 77, 81)
-    # Fix C: semantic blog matching for unmapped informational
-    existing_blogs = [get_url(r) for _, r in url_df.iterrows() if '/blog/' in get_url(r).lower()]
-    unmapped_info  = [r['Keyword'] for r in mapped if r['Intent'] == 'Informational' and not r['Landing Page']]
-    blog_semantic  = {}
-    if unmapped_info and existing_blogs:
-        top_info = sorted(unmapped_info, key=lambda k: next((r['Volume'] for r in mapped if r['Keyword'] == k), 0), reverse=True)[:400]
-        blog_semantic = claude_match_blogs(api_key, top_info, existing_blogs, url_df, status_text, progress_bar, 81, 85)
-    # Business relevance
-    low_scored = [r['Keyword'] for r in mapped if not r['Landing Page'] or r['Final Score'] < 0.15]
-    confirmed  = {r['Keyword']: 'RELEVANT' for r in mapped if r['Landing Page'] and r['Final Score'] >= 0.15}
+    """
+    Phase 4: Business relevance check only.
+    Blog validation and semantic blog matching removed — Claude already
+    validated all keyword-URL matches with High/Medium confidence in Phase 2.
+    Any match that survived Phase 2 is already trustworthy.
+    """
+    progress_bar.progress(82)
+    status_text.text("Phase 4: Checking business relevance...")
+
+    # Keywords with a Phase 2 Claude match are confirmed relevant
+    confirmed = {r['Keyword']: 'RELEVANT'
+                 for r in mapped if r['Landing Page'] and r['Final Score'] > 0}
+
+    # Keywords without a match need relevance judgment
+    unmatched = [r['Keyword'] for r in mapped if not r['Landing Page']]
+
     rel_map = {}
-    if low_scored:
-        rel_map = claude_relevance(api_key, low_scored, biz_desc, excl_str, status_text, progress_bar, 85, 92)
+    if unmatched:
+        rel_map = claude_relevance(api_key, unmatched, biz_desc, excl_str,
+                                   status_text, progress_bar, 82, 92)
+
     all_rel = {**confirmed, **rel_map}
-    # Apply blog fixes
-    for r in mapped:
-        kw = r['Keyword']
-        if (r['Landing Page'] and '/blog/' in r['Landing Page']
-                and r['Content Score'] < 0.15
-                and blog_valid.get(kw, 'YES') == 'NO'):
-            r['Landing Page'] = ''; r['Match Source'] = ''; r['Content Score'] = 0.0; r['Final Score'] = 0.0
-        if r['Intent'] == 'Informational' and not r['Landing Page']:
-            slug = blog_semantic.get(kw)
-            if slug:
-                full_url = next((u for u in existing_blogs if slug in u), None)
-                if full_url:
-                    r['Landing Page'] = full_url; r['Match Source'] = 'Claude semantic (blog)'; r['Final Score'] = 0.25
     progress_bar.progress(92)
     return all_rel, mapped
 
@@ -2183,80 +2274,148 @@ def build_excel(gsc_df, mapped, rel_map, clusters, url_clusters, taxonomy=None):
             c.fill = fill; c.font = Font(size=10, bold=is_primary)
     cw(ws5, [22,28,12,10,50,12,15,14,28]); ws5.freeze_panes = 'A2'
 
-    # TAB 6: Priority Roadmap (with Theme + Sub-theme)
+    # TAB 6: Priority Roadmap — ONE ROW PER CLUSTER (client-facing strategy)
     ws6 = wb.create_sheet('Priority Roadmap')
-    ws6['A1'] = 'SEO Content Opportunity Roadmap'
-    ws6['A1'].font = Font(bold=True, size=14, color='0F6E56'); ws6.merge_cells('A1:J1')
+    ws6['A1'] = 'SEO Content Strategy Roadmap'
+    ws6['A1'].font = Font(bold=True, size=14, color='0F6E56')
+    ws6.merge_cells('A1:L1')
+
+    # Summary counts
     qw   = sum(1 for r in mapped if r['Ranking Status'] == 'Quick win p11-20')
     weak = sum(1 for r in mapped if r['Ranking Status'] in ['Weak ranking p21-50','Very weak p51-100'])
     pnr  = sum(1 for r in mapped if r['Landing Page'] and r['Ranking Status'] == 'Not ranking')
-    bgap = len(gaps)
+    bgap = sum(1 for r in mapped if not r['Landing Page']
+               and rel_map.get(r['Keyword'],'') in ('RELEVANT','BORDERLINE'))
     conf = sum(1 for r in mapped if r['Landing Page'] and r['Ranking Status'] == 'Ranking p1-10')
+
     hdr(ws6, 3, ['Opportunity Type','Count','Total Volume','Action','Priority',''])
-    summary = [
-        ('Quick Wins (p11-20)', qw, sum(r['Volume'] for r in mapped if r['Ranking Status']=='Quick win p11-20'), 'Optimise existing pages', 'High', C['DGR']),
-        ('Weak Rankings (p21-100)', weak, sum(r['Volume'] for r in mapped if r['Ranking Status'] in['Weak ranking p21-50','Very weak p51-100']), 'Improve content + internal links', 'High', C['YL']),
-        ('Pages Exist — Not Ranking', pnr, sum(r['Volume'] for r in mapped if r['Landing Page'] and r['Ranking Status']=='Not ranking'), 'Optimise existing pages', 'Medium', C['BL']),
-        ('Business Relevant Gaps', bgap, sum(r['Volume'] for r in gaps), 'Create new pages / blog posts', 'Medium', C['PU']),
-        ('Already Ranking Well', conf, sum(r['Volume'] for r in mapped if r['Landing Page'] and r['Ranking Status']=='Ranking p1-10'), 'Monitor only', 'Low', C['GY']),
+    summary_rows = [
+        ('Quick Wins (p11-20)',      qw,   sum(r['Volume'] for r in mapped if r['Ranking Status']=='Quick win p11-20'), 'Optimise existing pages', 'High', C['DGR']),
+        ('Weak Rankings (p21-100)',  weak, sum(r['Volume'] for r in mapped if r['Ranking Status'] in ['Weak ranking p21-50','Very weak p51-100']), 'Improve content + internal links', 'High', C['YL']),
+        ('Pages Exist — Not Ranking',pnr,  sum(r['Volume'] for r in mapped if r['Landing Page'] and r['Ranking Status']=='Not ranking'), 'Optimise existing pages', 'Medium', C['BL']),
+        ('Business Relevant Gaps',   bgap, sum(r['Volume'] for r in mapped if not r['Landing Page'] and rel_map.get(r['Keyword'],'') in ('RELEVANT','BORDERLINE')), 'Create new content', 'Medium', C['PU']),
+        ('Already Ranking Well',     conf, sum(r['Volume'] for r in mapped if r['Landing Page'] and r['Ranking Status']=='Ranking p1-10'), 'Monitor only', 'Low', C['GY']),
     ]
-    for i, (opp,cnt,vol,act,pri,color) in enumerate(summary):
-        r = i+4; fill = make_fill(color)
+    for i, (opp,cnt,vol,act,pri,color) in enumerate(summary_rows):
+        r_row = i+4; fill = make_fill(color)
         for col, v in enumerate([opp,cnt,vol,act,pri,''], 1):
-            c = ws6.cell(row=r, column=col, value=v); c.fill = fill; c.font = Font(size=10, bold=(col==5))
-    dr = len(summary) + 7
-    ws6.cell(row=dr, column=1, value='Detailed Action List — sorted by Theme > Sub-theme > Priority').font = Font(bold=True, size=12, color='0F6E56')
-    ws6.merge_cells(start_row=dr, start_column=1, end_row=dr, end_column=11); dr += 1
-    hdr(ws6, dr, ['Theme','Sub-theme','Content Group','Primary?','Keyword','Volume',
-                  'Your Position','Intent','Final Score','Opportunity','Action','Mapped URL']); dr += 1
+            c = ws6.cell(row=r_row, column=col, value=v)
+            c.fill = fill; c.font = Font(size=10, bold=(col==5))
+
+    # ── Cluster-level roadmap ─────────────────────────────────────────────
+    dr = len(summary_rows) + 7
+    ws6.cell(row=dr, column=1,
+             value='Content Strategy — One Row Per Cluster').font = Font(bold=True, size=12, color='0F6E56')
+    ws6.merge_cells(start_row=dr, start_column=1, end_row=dr, end_column=12); dr += 1
+
+    hdr(ws6, dr, ['Priority','Theme','Sub-theme','Content Group','Content Type',
+                  'Primary Keyword','Secondary Keywords','Total Volume','# Keywords',
+                  'Action','Mapped URL','Confidence']); dr += 1
+
     PORD = {'Quick win — optimise':1,'Weak ranking':2,'Page exists — optimise':3,
             'Blog exists — optimise':3,'Business relevant gap':4,'True content gap':5,
             'Confirmed existing page':6}
-    AF = {'Quick win — optimise':make_fill(C['DGR']),'Weak ranking':make_fill(C['YL']),
-          'Page exists — optimise':make_fill(C['BL']),'Blog exists — optimise':make_fill(C['OR']),
-          'Business relevant gap':make_fill(C['PU']),'True content gap':make_fill(C['RD']),
-          'Confirmed existing page':make_fill(C['GY'])}
-    all_items = []
-    for r in mapped:
-        rel = rel_map.get(r['Keyword'],''); url = r['Landing Page']
-        rs  = r['Ranking Status']; fs = r['Final Score']; src = r.get('Match Source','')
-        opp, act = get_group_action(r, rel)
-        pri = {1:'High',2:'High',3:'Medium',4:'Medium',5:'Low',6:'Low'}.get(PORD.get(opp,5),'Low')
-        all_items.append({**r,'opp':opp,'act':act,'pri':pri,'po':PORD.get(opp,5)})
-    all_items.sort(key=lambda x: (
-        x.get('Theme','zzz'), x.get('Sub-theme','zzz'),
-        x.get('Content Group','zzz'),
-        x.get('Primary Keyword','') != 'PRIMARY',
-        x['po'], -x['Volume']))
-    # Build CG → URL mapping so every keyword in same group shows same URL
-    cg_url_map = {}
+    AF = {'Quick win — optimise':   make_fill(C['DGR']),
+          'Weak ranking':            make_fill(C['YL']),
+          'Page exists — optimise':  make_fill(C['BL']),
+          'Blog exists — optimise':  make_fill(C['OR']),
+          'Business relevant gap':   make_fill(C['PU']),
+          'True content gap':        make_fill(C['RD']),
+          'Confirmed existing page': make_fill(C['GY'])}
+
+    # Build cluster-level summary from mapped rows
+    from collections import defaultdict
+    cluster_rows = defaultdict(list)
     for r in mapped:
         cg = r.get('Content Group','')
-        url = r.get('Landing Page','') or ''
-        if cg and url and cg not in cg_url_map:
-            cg_url_map[cg] = url
+        if cg:
+            cluster_rows[cg].append(r)
+        # Keywords without a content group get their own virtual group
+        else:
+            cluster_rows[f"__{r['Keyword']}__"].append(r)
 
-    for item in all_items:
+    cluster_items = []
+    for cg, rows in cluster_rows.items():
+        # Determine cluster-level action:
+        # If ANY keyword has a mapped URL → Optimise that URL
+        # Otherwise → Create new
+        mapped_rows = [r for r in rows if r['Landing Page']]
+        url_for_cluster = ''
+        confidence_for_cluster = ''
+        if mapped_rows:
+            # Pick the highest confidence / highest scoring URL
+            best = max(mapped_rows, key=lambda x: x.get('Final Score',0))
+            url_for_cluster  = best['Landing Page']
+            src_txt = best.get('Match Source','')
+            confidence_for_cluster = (
+                'High'   if 'High' in src_txt else
+                'Medium' if 'Medium' in src_txt else
+                'Confirmed' if 'GSC' in src_txt else 'Medium'
+            )
+
+        # Group-level action
+        rel_any = any(rel_map.get(r['Keyword'],'') in ('RELEVANT','BORDERLINE') for r in rows)
+        first_r = rows[0]
+        group_action_opp, group_action_act = get_group_action(
+            {**first_r, 'Landing Page': url_for_cluster,
+             '_is_loc_group': any(r.get('_is_loc_group') for r in rows)},
+            'RELEVANT' if rel_any else 'BORDERLINE'
+        )
+
+        # Ranking status for priority
+        rs_list = [r['Ranking Status'] for r in rows]
+        if any(s == 'Quick win p11-20' for s in rs_list):       po = 1
+        elif any(s in ('Weak ranking p21-50','Very weak p51-100') for s in rs_list): po = 2
+        elif url_for_cluster:                                    po = 3
+        elif rel_any:                                            po = 4
+        else:                                                    po = 5
+        pri = {1:'High',2:'High',3:'Medium',4:'Medium',5:'Low'}.get(po,'Low')
+
+        # Primary keyword = highest volume
+        rows_sorted = sorted(rows, key=lambda x: -x.get('Volume',0))
+        primary_kw  = rows_sorted[0]['Keyword']
+        secondary   = ' | '.join(r['Keyword'] for r in rows_sorted[1:8])
+        total_vol   = sum(r.get('Volume',0) for r in rows)
+        theme       = first_r.get('Theme','')
+        subtheme    = first_r.get('Sub-theme','')
+        gtype       = first_r.get('_group_type','')
+        content_type = ('Blog post' if 'Blog' in gtype else
+                        'Location page' if any(r.get('_is_loc_group') for r in rows) else
+                        'Service page')
+
+        cluster_items.append({
+            'cg': cg if not cg.startswith('__') else '',
+            'theme': theme, 'subtheme': subtheme,
+            'content_type': content_type,
+            'primary_kw': primary_kw, 'secondary': secondary,
+            'total_vol': total_vol, 'n_kws': len(rows),
+            'opp': group_action_opp, 'act': group_action_act,
+            'url': url_for_cluster, 'confidence': confidence_for_cluster,
+            'pri': pri, 'po': po,
+        })
+
+    # Sort: Priority → Theme → Total Volume desc
+    cluster_items.sort(key=lambda x: (x['po'], x['theme'], x['subtheme'], -x['total_vol']))
+
+    for item in cluster_items:
         fill = AF.get(item['opp'], make_fill(C['WH']))
-        is_primary = item.get('Primary Keyword','') == 'PRIMARY'
-        # Show mapped URL only for optimise actions, blank for create-new actions
-        item_url = item.get('Landing Page','') or ''
-        cg_url   = cg_url_map.get(item.get('Content Group',''), '')
-        show_url = cg_url if item_url or cg_url else ''
-        # Only show URL when action involves an existing page
-        is_optimise = any(x in item['act'] for x in ['Optimise','optimise','Update','Monitor'])
-        display_url = show_url if is_optimise else ''
-        for col, v in enumerate([item.get('Theme',''), item.get('Sub-theme',''),
-                                  item.get('Content Group',''),
-                                  '★ PRIMARY' if is_primary else '',
-                                  item['Keyword'], item['Volume'], item['Your Position'],
-                                  item['Intent'], item['Final Score'],
-                                  item['opp'], item['act'], display_url], 1):
+        is_optimise = 'Optimise' in item['act'] or 'optimise' in item['act']
+        for col, v in enumerate([
+            item['pri'], item['theme'], item['subtheme'], item['cg'],
+            item['content_type'], item['primary_kw'], item['secondary'],
+            item['total_vol'], item['n_kws'], item['act'],
+            item['url'] if is_optimise else '',
+            item['confidence'] if is_optimise else '',
+        ], 1):
             c = ws6.cell(row=dr, column=col, value=v)
             c.fill = fill
-            c.font = Font(size=10, bold=is_primary, color='0563C1' if col==12 and display_url else '000000')
+            c.font = Font(size=10, bold=(item['po'] <= 2),
+                         color='0563C1' if col==11 and v else '000000')
         dr += 1
-    cw(ws6, [22,28,12,10,48,12,14,15,12,28,42,65]); ws6.freeze_panes = f'A{len(summary)+10}'
+
+    cw(ws6, [10,22,28,12,14,42,65,12,10,38,65,12])
+    ws6.freeze_panes = f'A{len(summary_rows)+10}'
+
     # Taxonomy reference tab
     if taxonomy:
         wst = wb.create_sheet('Taxonomy Reference')
