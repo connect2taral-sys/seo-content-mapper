@@ -2135,13 +2135,15 @@ def get_group_action(r, rel):
     # ── Gap actions (no existing page) ────────────────────────────────────
     # Group-level type determines action for ALL keywords in the group.
     # One group = one page = one action. No per-keyword overrides.
-    # The group type is determined by majority intent vote (computed in assign_content_groups).
-    # With intent-aware sub-themes (Phase 5), groups should be pure —
-    # all informational in one group, all transactional in another.
+    # Fallback: if _group_type is not set, use keyword's own intent.
     if rel in ('RELEVANT', 'BORDERLINE'):
         if is_loc:
             return 'Business relevant gap', 'Create new location service page'
-        if gtype == 'Blog post':
+        # Determine effective group type — use _group_type if set, else infer from intent
+        effective_type = gtype if gtype else (
+            'Blog post' if kw_intent == 'Informational' else 'Service page'
+        )
+        if effective_type == 'Blog post':
             return 'Business relevant gap', 'Create new blog post'
         return 'Business relevant gap', 'Create new service page'
 
