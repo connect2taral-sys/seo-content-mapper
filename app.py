@@ -330,9 +330,13 @@ def classify_intent_rules(kw):
     return 'Ambiguous'
 
 # ── HELPERS ───────────────────────────────────────────────────────────────
-def expand(t):
+def expand(t, extra_abbrevs=None):
+    """Expand abbreviations. extra_abbrevs from Phase 0 Claude detection."""
     t = t.lower()
     for p, r in EXPAND: t = re.sub(p, r, t)
+    if extra_abbrevs:
+        for abbr, full in extra_abbrevs.items():
+            t = re.sub(r'' + re.escape(abbr.lower()) + r'', full.lower(), t)
     return t
 
 def extract_stop_words(sf_df):
@@ -784,6 +788,13 @@ def is_compat(kc, uc, kw, url):
     if 'electrical' in uc and ke & ELEC_GRP: return True
     return False
 
+def is_compat_universal(kw_theme, url_theme):
+    """Universal compatibility: keyword theme must match URL theme.
+    Works for any industry. Falls back to True if either theme unknown."""
+    if not kw_theme or not url_theme: return True
+    if kw_theme == 'Other' or url_theme == 'Other': return True
+    return kw_theme == url_theme
+
 def clean_kw(kw):
     kw = expand(kw.lower().strip())
     for p in [r'\bnear me\b', r'\bnear\b']: kw = re.sub(p, '', kw)
@@ -1094,18 +1105,65 @@ Return ONLY valid JSON:
         result = call_claude(api_key, prompt, 3000, 60)
         taxonomy = result.get('taxonomy', {})
         if taxonomy:
-            progress_bar.progress(2)
             n_themes = len(taxonomy)
             n_subs   = sum(len(v) for v in taxonomy.values())
             status_text.text(f"Phase 0: Taxonomy ready — {n_themes} themes, {n_subs} sub-themes")
-            return taxonomy
-    except Exception as e:
-        pass
+        else:
+            taxonomy = {}
+    except Exception:
+        taxonomy = {}
 
-    # Fallback: empty taxonomy (tool still works, just less constrained)
+    # Step 2: URL → theme map + industry abbreviations
+    status_text.text("Phase 0: Categorising pages and detecting abbreviations...")
+    url_meta = []
+    for _, row in sf_df.iterrows():
+        url   = get_url(row)
+        if not url or is_excl(url): continue
+        title = str(row.get('Title 1', row.get('Page Title','')) or '').strip()
+        h1    = str(row.get('H1-1', row.get('H1','')) or '').strip()
+        title_clean = re.sub(r'\s*[\|\-–]\s*.{0,40}$', '', title).strip()
+        slug  = re.sub(r'https?://[^/]+', '', url).strip('/')[:60]
+        if (title_clean or h1) and slug:
+            url_meta.append({"slug": slug, "title": title_clean[:100], "h1": h1[:80]})
+        if len(url_meta) >= 150: break
+
+    url_theme_map = {}
+    abbrev_map    = {}
+    if url_meta:
+        taxonomy_themes = list(taxonomy.keys()) if taxonomy else []
+        theme_list = json.dumps(taxonomy_themes) if taxonomy_themes else "derive from business"
+        url_prompt = f"""SEO expert. For each page assign its theme. Also return industry abbreviations.
+
+Business: {biz_desc}
+Available themes: {theme_list}
+
+Return ONLY valid JSON:
+{{
+  "url_themes": {{"slug": "Theme Name", ...}},
+  "abbreviations": {{"abbrev": "full form", ...}}
+}}
+
+Rules for url_themes: use title and H1 as primary signals.
+Rules for abbreviations: only include abbreviations used in this industry (max 20).
+Examples for HVAC: {{"ac": "air conditioning", "hvac": "heating ventilation air conditioning"}}
+Examples for dental: {{"tmj": "temporomandibular joint", "cerec": "ceramic reconstruction"}}
+
+Pages:
+{json.dumps(url_meta[:80])}"""
+        try:
+            res2 = call_claude(api_key, url_prompt, 3000, 60)
+            url_theme_map = res2.get('url_themes', {})
+            abbrev_map    = res2.get('abbreviations', {})
+            status_text.text(
+                f"Phase 0: Done — {len(url_theme_map)} pages categorised, "
+                f"{len(abbrev_map)} abbreviations")
+        except Exception:
+            pass
+
     progress_bar.progress(2)
-    status_text.text("Phase 0: Taxonomy generation skipped — using adaptive mode")
-    return {}
+    if not taxonomy and not url_theme_map:
+        status_text.text("Phase 0: Using adaptive mode")
+    return taxonomy, url_theme_map, abbrev_map
 
 def taxonomy_to_prompt_block(taxonomy):
     """
@@ -1192,7 +1250,8 @@ def phase1_gsc(gsc_df, sf_df, weights, status_text, progress_bar):
 
 # ── PHASE 2: KEYWORD MAPPING ──────────────────────────────────────────────
 def phase2_map(sem_df, url_df, gsc_dedup, gsc_val_df, weights, threshold,
-               your_col, intent_map, hp_slugs, status_text, progress_bar):
+               your_col, intent_map, hp_slugs, url_theme_map,
+               status_text, progress_bar):
     status_text.text("Phase 2: Building TF-IDF models...")
     progress_bar.progress(24)
     svc_df  = url_df[url_df['ptype'] == 'service'].reset_index(drop=True)
@@ -1206,6 +1265,14 @@ def phase2_map(sem_df, url_df, gsc_dedup, gsc_val_df, weights, threshold,
         # Homepage if slug is empty OR all slug words are stop/city/brand words
         if not slug_words or slug_words.issubset(hp_slugs | {''}):
             hp_urls.add(u.lower().strip())
+    def get_url_theme(url):
+        """Get theme for a URL from Phase 0 Claude output."""
+        if not url or not url_theme_map: return ''
+        slug = re.sub(r'https?://[^/]+', '', url.lower()).strip('/')
+        if slug in url_theme_map: return url_theme_map[slug]
+        for k, v in url_theme_map.items():
+            if slug.endswith(k) or k.endswith(slug): return v
+        return ''
     gsc_status = dict(zip(gsc_val_df['Query'].str.lower().str.strip(), gsc_val_df['Mapping Status']))
     keywords = sem_df['Keyword'].fillna('').tolist()
     volumes  = sem_df['Volume'].fillna(0).tolist()
@@ -1234,7 +1301,8 @@ def phase2_map(sem_df, url_df, gsc_dedup, gsc_val_df, weights, threshold,
                 if s < threshold: break
                 url = get_url(blog_df.iloc[idx])
                 uc  = blog_df.iloc[idx]['cats']
-                if is_compat(kc, uc, kw, url):
+                kw_th = classify_theme(kw); url_th = get_url_theme(url)
+                if is_compat(kc, uc, kw, url) or is_compat_universal(kw_th, url_th):
                     chosen = url; cs = round(s, 4); source = 'Content match (blog)'; break
         else:
             hp_fb = None
@@ -1243,7 +1311,8 @@ def phase2_map(sem_df, url_df, gsc_dedup, gsc_val_df, weights, threshold,
                 if s < threshold: break
                 url = get_url(svc_df.iloc[idx])
                 uc  = svc_df.iloc[idx]['cats']
-                if is_compat(kc, uc, kw, url):
+                kw_th = classify_theme(kw); url_th = get_url_theme(url)
+                if is_compat(kc, uc, kw, url) or is_compat_universal(kw_th, url_th):
                     if url.lower().strip() in hp_urls:
                         if hp_fb is None: hp_fb = (url, round(s, 4))
                         continue
@@ -1254,7 +1323,9 @@ def phase2_map(sem_df, url_df, gsc_dedup, gsc_val_df, weights, threshold,
         gu  = gd.get('url', '')
         guc = cat_url(gu) if gu else frozenset()
         gst = gsc_status.get(kl, '')
-        gv  = gu and not is_excl(gu) and is_compat(kc, guc, kw, gu)
+        kw_th_g = classify_theme(kw); url_th_g = get_url_theme(gu)
+        gv  = gu and not is_excl(gu) and (
+              is_compat(kc, guc, kw, gu) or is_compat_universal(kw_th_g, url_th_g))
         if gv:
             if intent == 'Informational' and '/blog/' not in gu.lower(): gv = False
             if gst == 'Suspicious' and not chosen: gv = False
@@ -1430,103 +1501,136 @@ def build_content_groups(mapped):
     return mapped
 
 # ── PHASE 5: THEME + SUB-THEME — FULLY AI DRIVEN ─────────────────────────
+def cluster_for_batching(keywords, n_clusters=None):
+    """TF-IDF KMeans clustering — universal pre-sorter for Phase 5.
+    Works for any industry. Returns {keyword: cluster_id}."""
+    from sklearn.cluster import KMeans as _KMeans
+    if len(keywords) < 5:
+        return {kw: 0 for kw in keywords}
+    n = n_clusters or max(5, min(40, len(keywords) // 15))
+    n = min(n, len(keywords) - 1)
+    try:
+        vec = TfidfVectorizer(ngram_range=(1,2), min_df=1,
+                              max_features=8000, sublinear_tf=True)
+        X   = vec.fit_transform(keywords)
+        km  = _KMeans(n_clusters=n, random_state=42, n_init=5, max_iter=100)
+        labels = km.fit_predict(X)
+        return {kw: int(lbl) for kw, lbl in zip(keywords, labels)}
+    except Exception:
+        # Fallback: group by first word
+        groups = {}
+        for kw in keywords:
+            key = kw.lower().split()[0] if kw.strip() else '0'
+            if key not in groups: groups[key] = len(groups)
+        return {kw: groups.get(kw.lower().split()[0] if kw.strip() else '0', 0)
+                for kw in keywords}
+
 def phase5_themes(mapped, url_df, api_key, biz_desc, taxonomy, status_text, progress_bar):
     """
-    Claude assigns BOTH Theme and Sub-theme for every keyword.
-    Source of truth: the keyword text + business description.
-    Rule-based classify_theme() is used only as a pre-sorter for batching
-    so related keywords go in the same batch — giving Claude context for
-    consistent sub-theme naming. Claude makes the final decision.
+    AI-powered keyword grouping. Claude groups keywords into content clusters.
+    Each cluster = one piece of content = one sub-theme + one content type.
+    Pre-sort: TF-IDF KMeans (universal). Fallback: per-keyword assignment.
     """
-    status_text.text("Phase 5: AI-powered theme and sub-theme assignment...")
+    from collections import defaultdict
+    status_text.text("Phase 5: AI-powered content grouping...")
     progress_bar.progress(93)
 
-    # Pre-sort keywords by approximate topic so each Claude batch
-    # sees related keywords — produces more consistent sub-theme names
-    from collections import defaultdict
+    all_kws = [r['Keyword'] for r in mapped]
+
+    # KMeans pre-sort — groups similar keywords together before sending to Claude
+    status_text.text("Phase 5: Clustering keywords by similarity...")
+    kw_cluster = cluster_for_batching(all_kws)
+
     buckets = defaultdict(list)
     for r in mapped:
-        bucket = classify_theme(r['Keyword'])  # used for SORTING only, not final answer
-        buckets[bucket].append({
+        buckets[kw_cluster.get(r['Keyword'], 0)].append({
             'keyword': r['Keyword'],
             'intent':  r['Intent'],
             'volume':  r['Volume'],
         })
 
-    theme_subtheme_map = {}  # keyword → (theme, subtheme)
-    all_buckets = list(buckets.items())
-    total_buckets = len(all_buckets)
+    group_map  = {}   # keyword → (theme, subtheme, group_type)
+    total_b    = len(buckets)
+    success_ct = 0
+    taxonomy_block = taxonomy_to_prompt_block(taxonomy)
 
-    for bi, (bucket_name, items) in enumerate(all_buckets):
-        batches = [items[i:i+150] for i in range(0, len(items), 150)]
-        for ba_idx, batch in enumerate(batches):
-            pct = min(93 + int(((bi * len(batches) + ba_idx) /
-                                max(sum(len(items) for _,items in all_buckets)/150, 1)) * 3), 95)
-            progress_bar.progress(pct)
-            status_text.text(
-                f"Phase 5: Assigning themes ({bi+1}/{total_buckets} — {bucket_name})...")
+    for bi, (bucket_id, items) in enumerate(buckets.items()):
+        pct = min(93 + int((bi / max(total_b, 1)) * 3), 95)
+        progress_bar.progress(pct)
+        status_text.text(f"Phase 5: Grouping keywords ({bi+1}/{total_b})...")
 
-            kw_list = [{"keyword": x['keyword'], "intent": x['intent']} for x in batch]
+        for batch_start in range(0, len(items), 80):
+            batch   = items[batch_start:batch_start+80]
+            kw_list = [{"keyword": x['keyword'], "intent": x['intent'],
+                        "volume": x['volume']} for x in batch]
 
-            taxonomy_block = taxonomy_to_prompt_block(taxonomy)
-            prompt = f"""You are an expert SEO strategist. For each keyword assign:
-1. "theme"    — the top-level service category this keyword belongs to
-2. "subtheme" — the specific content topic (precise enough for ONE page/post)
+            prompt = f"""SEO strategist. Group these keywords into content clusters.
+Each cluster = ONE piece of content (one service page OR one blog post).
 
-Business context: {biz_desc}
+Business: {biz_desc}
 {taxonomy_block}
-THEME must reflect what SERVICE the keyword is about — derived entirely from
-the keyword text, not from any URL or page.
 
-SUBTHEME rules:
-- Specific enough that it represents exactly ONE page or blog post
-- Keywords with identical searcher intent get the SAME subtheme
-- Max 4 words, title case
-- Never use generic labels like "Service", "Repair" alone — always include the entity
-  Good: "Furnace Repair", "AC Tune-up Cost", "Drain Odor Solutions", "Water Heater Lifespan"
-  Bad:  "Heating", "Service", "Repair", "HVAC"
+RULES:
+1. Keywords with the same searcher job → same cluster
+2. Transactional (hire/buy) → content_type: "Service page"
+3. Informational (learn/research/diagnose) → content_type: "Blog post"
+4. NEVER mix content types in one cluster
+5. cluster_name: specific, max 4 words, title case
+   Good: "Furnace Repair", "AC Troubleshooting", "AC Cost Guide"
+   Bad:  "AC Service", "HVAC", "Repair" (too generic)
+6. theme: top-level service category from taxonomy
 
-Return ONLY valid JSON: {{"keyword": {{"theme": "X", "subtheme": "Y"}}, ...}}
+Return ONLY valid JSON array:
+[{{"cluster_name":"X","theme":"Y","content_type":"Service page or Blog post",
+  "keywords":["kw1","kw2"]}}]
 
 Keywords:
 {json.dumps(kw_list)}"""
 
             for attempt in range(3):
                 try:
-                    result = call_claude(api_key, prompt, 2000, 50)
-                    if isinstance(result, dict):
-                        for item in batch:
-                            kw = item['keyword']
-                            val = result.get(kw, {})
-                            if isinstance(val, dict):
-                                theme_subtheme_map[kw] = (
-                                    val.get('theme', classify_theme(kw)),
-                                    val.get('subtheme', '')
-                                )
-                            else:
-                                theme_subtheme_map[kw] = (classify_theme(kw), '')
+                    result = call_claude(api_key, prompt, 3000, 55)
+                    if isinstance(result, list) and result:
+                        for cluster in result:
+                            cname  = cluster.get('cluster_name', '')
+                            ctheme = cluster.get('theme', '')
+                            ctype  = cluster.get('content_type', 'Service page')
+                            for kw in cluster.get('keywords', []):
+                                group_map[kw] = (ctheme, cname, ctype)
+                        success_ct += 1
                     break
                 except Exception:
                     if attempt < 2:
                         time.sleep(2)
                     else:
-                        # Fallback: rule-based theme, blank subtheme
                         for item in batch:
-                            theme_subtheme_map[item['keyword']] = (
-                                classify_theme(item['keyword']), '')
+                            kw = item['keyword']
+                            if kw not in group_map:
+                                group_map[kw] = (
+                                    classify_theme(kw), '',
+                                    'Blog post' if item['intent'] == 'Informational'
+                                    else 'Service page')
             time.sleep(0.1)
 
-    # Apply to every keyword row
+    phase5_succeeded = success_ct > (total_b * 0.5)
+
     for r in mapped:
         kw = r['Keyword']
-        if kw in theme_subtheme_map:
-            r['Theme'], r['Sub-theme'] = theme_subtheme_map[kw]
+        if kw in group_map:
+            theme, subtheme, gtype = group_map[kw]
+            r['Theme']       = theme or classify_theme(kw)
+            r['Sub-theme']   = subtheme
+            r['_group_type'] = gtype
         else:
-            r['Theme']     = classify_theme(kw)
-            r['Sub-theme'] = ''
+            r['Theme']       = classify_theme(kw)
+            r['Sub-theme']   = ''
+            r['_group_type'] = ('Blog post' if r['Intent'] == 'Informational'
+                                else 'Service page')
+        r['_phase5_grouped'] = phase5_succeeded
 
     progress_bar.progress(96)
     return mapped
+
 
 # ── PHASE 6: SEMANTIC CLUSTERING ──────────────────────────────────────────
 def phase6_cluster(mapped, rel_map, api_key, status_text, progress_bar):
@@ -1812,10 +1916,13 @@ def assign_content_groups(mapped, api_key, biz_desc, status_text, progress_bar):
     from collections import Counter, defaultdict
 
     # Step 1: Normalise sub-themes
-    unique_subs = set(r.get('Sub-theme','') for r in mapped if r.get('Sub-theme',''))
-    canon_map   = normalise_subthemes(api_key, unique_subs, biz_desc, status_text, progress_bar)
-    for r in mapped:
-        r['Sub-theme'] = canon_map.get(r.get('Sub-theme',''), r.get('Sub-theme',''))
+    # Guard: skip if Phase 5 AI grouping produced clean cluster names
+    phase5_grouped = any(r.get('_phase5_grouped') for r in mapped)
+    if not phase5_grouped:
+        unique_subs = set(r.get('Sub-theme','') for r in mapped if r.get('Sub-theme',''))
+        canon_map   = normalise_subthemes(api_key, unique_subs, biz_desc, status_text, progress_bar)
+        for r in mapped:
+            r['Sub-theme'] = canon_map.get(r.get('Sub-theme',''), r.get('Sub-theme',''))
 
     # Step 2: Tag each keyword with its location using pattern-based detection
     for r in mapped:
@@ -1861,7 +1968,9 @@ def assign_content_groups(mapped, api_key, biz_desc, status_text, progress_bar):
         key = (r.get('Theme','Other'), r.get('Sub-theme',''),
                r.get('Landing Page','') or 'GAP', r.get('_loc',''))
         r['Content Group']       = cg_map.get(key, '')
-        r['_group_type']         = cg_type_map.get(key, '')
+        # Guard: don't overwrite _group_type if Phase 5 already set it
+        if not r.get('_group_type'):
+            r['_group_type'] = cg_type_map.get(key, '')
         r['_is_loc_group']       = bool(r.get('_loc',''))
         r['Primary Keyword']     = ''
 
@@ -1933,18 +2042,17 @@ def get_group_action(r, rel):
         return 'Page exists — optimise', 'Optimise existing service page for this keyword'
 
     # ── Gap actions (no existing page) ────────────────────────────────────
-    # Informational keywords always → blog post
-    if kw_intent == 'Informational':
-        if rel in ('RELEVANT', 'BORDERLINE'):
-            return 'Business relevant gap', 'Create new blog post'
-        return 'True content gap', 'Evaluate — may need new page'
-
+    # Group-level type determines action for ALL keywords in the group.
+    # One group = one page = one action. No per-keyword overrides.
+    # The group type is determined by majority intent vote (computed in assign_content_groups).
+    # With intent-aware sub-themes (Phase 5), groups should be pure —
+    # all informational in one group, all transactional in another.
     if rel in ('RELEVANT', 'BORDERLINE'):
         if is_loc:
             return 'Business relevant gap', 'Create new location service page'
-        if gtype == 'Service page':
-            return 'Business relevant gap', 'Create new service page'
-        return 'Business relevant gap', 'Create new blog post'
+        if gtype == 'Blog post':
+            return 'Business relevant gap', 'Create new blog post'
+        return 'Business relevant gap', 'Create new service page'
 
     return 'True content gap', 'Evaluate — may need new page'
 
@@ -2272,7 +2380,8 @@ if st.button("🚀 Run Full Analysis", disabled=bool(issues), use_container_widt
 
     try:
         # Phase 0: Generate locked taxonomy for this business
-        taxonomy = generate_taxonomy(api_key, biz_desc, sf_df, status_text, progress_bar)
+        taxonomy, url_theme_map, abbrev_map = generate_taxonomy(
+            api_key, biz_desc, sf_df, status_text, progress_bar)
 
         # Phase 1
         gsc_val, url_df, gsc_dedup, stop, hp_slugs = phase1_gsc(gsc_df, sf_df, weights, status_text, progress_bar)
@@ -2283,7 +2392,8 @@ if st.button("🚀 Run Full Analysis", disabled=bool(issues), use_container_widt
 
         # Phase 2
         mapped = phase2_map(sem_df, url_df, gsc_dedup, gsc_val, weights, threshold,
-                            your_col, intent_map, hp_slugs, status_text, progress_bar)
+                            your_col, intent_map, hp_slugs, url_theme_map,
+                            status_text, progress_bar)
 
         # Phase 4
         rel_map, mapped = phase4_relevance_blogs(mapped, url_df, api_key, biz_desc, excl_str,
