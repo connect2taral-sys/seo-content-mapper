@@ -883,7 +883,7 @@ Return ONLY valid JSON: {{"keyword": "Informational" or "Transactional", ...}}
 Keywords: {json.dumps(batch)}"""
 
     def parse_result(r, batch):
-        out = {{}}
+        out = {}
         for kw in batch:
             v = r.get(kw, '')
             out[kw] = v if v in ('Informational','Transactional') else 'Transactional'
@@ -893,7 +893,7 @@ Keywords: {json.dumps(batch)}"""
         api_key, batches,
         make_prompt=make_prompt,
         parse_result=parse_result,
-        fallback_fn=lambda b: {{k: 'Transactional' for k in b}},
+        fallback_fn=lambda b: {k: 'Transactional' for k in b},
         status_prefix="Claude — intent classification",
         status_text=status_text, progress_bar=progress_bar, p0=p0, p1=p1,
         max_tokens=1500, timeout=45
