@@ -912,7 +912,7 @@ Keywords: {json.dumps(batch)}"""
     return run_batches(
         api_key, batches,
         make_prompt=make_prompt,
-        parse_result=lambda r, b: r if isinstance(r, dict) else {k: 'BORDERLINE' for k in b},
+        parse_result=lambda r, b: ({k.lower(): v for k, v in r.items()} if isinstance(r, dict) else {k.lower(): 'BORDERLINE' for k in b}),
         fallback_fn=lambda b: {k: 'BORDERLINE' for k in b},
         status_prefix="Claude — business relevance",
         status_text=status_text, progress_bar=progress_bar, p0=p0, p1=p1,
@@ -1856,25 +1856,36 @@ def extract_location(kw):
         'cleaning','clean','company','companies','contractor','contractors',
         'plumber','plumbers','electrician','electricians','technician',
         'technicians','maintenance','replacement','emergency','near','local',
-        'hvac','drain','sewer','furnace','boiler','heater','plumbing',
-        'electrical','generator','pump','heating','cooling',
+        'hvac','drain','sewer','furnace','boiler','heater','heaters','plumbing',
+        'electrical','generator','pump','heating','cooling','water','tankless',
+        'ac','mini','split','ductless','backflow','sump','sprinkler',
     }
 
     words = kl.split()
 
     # ── Pattern 1: "... in/near/for [city] [optional state]" ─────────────
+    # STRICT: only match when the candidate looks like a proper place name
+    # Reject: descriptive phrases like "cold winters", "cold weather", "leaking water heater"
     m = re.search(r'\b(?:in|near|for)\s+([a-z][a-z\s]{2,30})$', kl)
     if m:
         candidate = m.group(1).strip()
         cwords = candidate.split()
         # Remove trailing state abbreviation for rejection check
-        core = ' '.join(cwords[:-1]) if (len(cwords) > 1 and cwords[-1] in US_STATES) else candidate
-        # Expanded reject list — include service/common words that slip through
-        _REJECT_P1 = NOT_LOC | {'come','from','does','pump','tank','pipe','line',
-                                  'unit','also','this','that','what','when','will',
-                                  'with','them','they','then','more','most','some',
-                                  'here','have','been','both','only','sump','come'}
-        if not any(w in _REJECT_P1 for w in core.split()):
+        core_words = cwords[:-1] if (len(cwords) > 1 and cwords[-1] in US_STATES) else cwords
+        # Big reject list — any word here means it's NOT a city name
+        _REJECT_P1 = NOT_LOC | {
+            'come','from','does','pump','tank','pipe','line','unit','also',
+            'this','that','what','when','will','with','them','they','then',
+            'more','most','some','here','have','been','both','only','sump',
+            'cold','warm','hot','cool','heat','weather','winter','winters',
+            'summer','spring','springs','fall','season','temperature','temp',
+            'leaking','dripping','noise','banging','humming','clicking','signs',
+            'settings','setting','issues','problems','going','working','broken',
+            'thermostat','pressure','flow','power','energy','money','savings',
+            'cost','costs','price','prices','years','days','time','times',
+            'small','large','high','low','best','good','bad','common','normal',
+        }
+        if not any(w in _REJECT_P1 for w in core_words):
             return candidate
 
     # ── Pattern 2: "[service] [city words] [state abbrev]" ───────────────
@@ -1926,6 +1937,12 @@ def extract_location(kw):
             'high','low','full','small','large','heavy','light',
             'electric','electrical','gas','water','solar','smart',
             # 'city','town','village' handled separately as CITY_SUFFIXES in Pattern 3
+            # Additional words that are NEVER place names
+            'settings','setting','temperature','noise','banging','signs','signal',
+            'signals','leaking','dripping','humming','clicking','buzzing','increase',
+            'decrease','improve','repair','broken','working','going','coming',
+            'thermostat','pressure','heater','weather','winters','summer','spring',
+            'energy','money','savings','power','voltage','current','circuit',
             # Question/informational words
             'what','when','where','which','that','this','these',
             'from','come','goes','goes','does','have','make',
@@ -2124,6 +2141,9 @@ def get_group_action(r, rel):
     if url and '/blog/' in url:
         return 'Page exists — optimise', 'Optimise existing blog post for this keyword'
     if url:
+        # Informational keyword mapped to any existing page → treat as blog optimisation
+        if kw_intent == 'Informational':
+            return 'Page exists — optimise', 'Optimise existing blog post for this keyword'
         # Location keyword on existing page
         if is_loc:
             if is_location_url(url):
@@ -2133,16 +2153,20 @@ def get_group_action(r, rel):
         return 'Page exists — optimise', 'Optimise existing service page for this keyword'
 
     # ── Gap actions (no existing page) ────────────────────────────────────
-    # Group-level type determines action for ALL keywords in the group.
-    # One group = one page = one action. No per-keyword overrides.
-    # Fallback: if _group_type is not set, use keyword's own intent.
+    # Rules (in priority order):
+    # 1. Informational keyword → ALWAYS blog post (never service/location page)
+    #    This is the most important rule — intent defines content type
+    # 2. Transactional + location detected → location service page
+    # 3. Transactional, no location → service page (use group type if set)
     if rel in ('RELEVANT', 'BORDERLINE'):
+        # Rule 1: Informational always → blog post
+        if kw_intent == 'Informational':
+            return 'Business relevant gap', 'Create new blog post'
+        # Rule 2: Transactional + location → location service page
         if is_loc:
             return 'Business relevant gap', 'Create new location service page'
-        # Determine effective group type — use _group_type if set, else infer from intent
-        effective_type = gtype if gtype else (
-            'Blog post' if kw_intent == 'Informational' else 'Service page'
-        )
+        # Rule 3: Transactional → service page
+        effective_type = gtype if gtype else 'Service page'
         if effective_type == 'Blog post':
             return 'Business relevant gap', 'Create new blog post'
         return 'Business relevant gap', 'Create new service page'
