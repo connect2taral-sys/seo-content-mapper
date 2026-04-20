@@ -1728,10 +1728,10 @@ def phase6_cluster(mapped, rel_map, api_key, status_text, progress_bar):
     status_text.text("Phase 6: Semantic clustering...")
     progress_bar.progress(97)
     unmapped_info  = sorted([(r['Keyword'], r['Volume']) for r in mapped
-                              if not r['Landing Page'] and rel_map.get(r['Keyword'], '') in ('RELEVANT','BORDERLINE')
+                              if not r['Landing Page'] and rel_map.get(r['Keyword'].lower(), '') in ('RELEVANT','BORDERLINE')
                               and r['Intent'] == 'Informational'], key=lambda x: -x[1])[:800]
     unmapped_trans = sorted([(r['Keyword'], r['Volume']) for r in mapped
-                              if not r['Landing Page'] and rel_map.get(r['Keyword'], '') in ('RELEVANT','BORDERLINE')
+                              if not r['Landing Page'] and rel_map.get(r['Keyword'].lower(), '') in ('RELEVANT','BORDERLINE')
                               and r['Intent'] == 'Transactional'], key=lambda x: -x[1])[:1200]
     clusters = []
     if unmapped_info:
@@ -2176,7 +2176,7 @@ def build_excel(gsc_df, mapped, rel_map, clusters, url_clusters, taxonomy=None):
             x.get('Theme',''), x.get('Sub-theme',''),
             x.get('Content Group',''), x.get('Primary Keyword','') != 'PRIMARY',
             -x.get('Volume',0)))):
-        row = i+2; url = r['Landing Page']; src = r['Match Source']; rel = rel_map.get(r['Keyword'], '')
+        row = i+2; url = r['Landing Page']; src = r['Match Source']; rel = rel_map.get(r['Keyword'].lower(), '')
         if url and '/blog/' in url:           fill = make_fill(C['BL'])
         elif src == 'GSC fallback':            fill = make_fill(C['YL'])
         elif src and 'Claude semantic' in src: fill = make_fill(C['OR'])
@@ -2204,7 +2204,7 @@ def build_excel(gsc_df, mapped, rel_map, clusters, url_clusters, taxonomy=None):
     for r in sorted(mapped, key=lambda x: (
             x.get('Theme',''), x.get('Sub-theme',''), x.get('Content Group',''),
             x.get('Primary Keyword','') != 'PRIMARY', -x.get('Volume',0))):
-        rel = rel_map.get(r['Keyword'], ''); url = r['Landing Page']
+        rel = rel_map.get(r['Keyword'].lower(), ''); url = r['Landing Page']
         rs  = r['Ranking Status']; fs = r['Final Score']; src = r.get('Match Source', '')
         opp, act = get_group_action(r, rel)
         fill = OPP_F.get(opp, make_fill(C['WH']))
@@ -2259,12 +2259,12 @@ def build_excel(gsc_df, mapped, rel_map, clusters, url_clusters, taxonomy=None):
     ws5 = wb.create_sheet('Business Relevant Gaps')
     hdr(ws5, 1, ['Theme','Sub-theme','Content Group','Primary?','Keyword','Volume','Intent','Relevance','Action Needed'])
     gaps = sorted([r for r in mapped if not r['Landing Page']
-                   and rel_map.get(r['Keyword'], '') in ('RELEVANT','BORDERLINE')],
+                   and rel_map.get(r['Keyword'].lower(), '') in ('RELEVANT','BORDERLINE')],
                   key=lambda x: (x.get('Theme',''), x.get('Sub-theme',''),
                                  x.get('Content Group',''),
                                  x.get('Primary Keyword','') != 'PRIMARY', -x.get('Volume',0)))
     for r in gaps:
-        rel = rel_map.get(r['Keyword'], '')
+        rel = rel_map.get(r['Keyword'].lower(), '')
         fill = make_fill(C['PU'] if rel == 'RELEVANT' else C['AM'])
         is_primary = r.get('Primary Keyword','') == 'PRIMARY'
         act = get_group_action(r, rel)[1]
@@ -2287,7 +2287,7 @@ def build_excel(gsc_df, mapped, rel_map, clusters, url_clusters, taxonomy=None):
     weak = sum(1 for r in mapped if r['Ranking Status'] in ['Weak ranking p21-50','Very weak p51-100'])
     pnr  = sum(1 for r in mapped if r['Landing Page'] and r['Ranking Status'] == 'Not ranking')
     bgap = sum(1 for r in mapped if not r['Landing Page']
-               and rel_map.get(r['Keyword'],'') in ('RELEVANT','BORDERLINE'))
+               and rel_map.get(r['Keyword'].lower(),'') in ('RELEVANT','BORDERLINE'))
     conf = sum(1 for r in mapped if r['Landing Page'] and r['Ranking Status'] == 'Ranking p1-10')
 
     hdr(ws6, 3, ['Opportunity Type','Count','Total Volume','Action','Priority',''])
@@ -2295,7 +2295,7 @@ def build_excel(gsc_df, mapped, rel_map, clusters, url_clusters, taxonomy=None):
         ('Quick Wins (p11-20)',      qw,   sum(r['Volume'] for r in mapped if r['Ranking Status']=='Quick win p11-20'), 'Optimise existing pages', 'High', C['DGR']),
         ('Weak Rankings (p21-100)',  weak, sum(r['Volume'] for r in mapped if r['Ranking Status'] in ['Weak ranking p21-50','Very weak p51-100']), 'Improve content + internal links', 'High', C['YL']),
         ('Pages Exist — Not Ranking',pnr,  sum(r['Volume'] for r in mapped if r['Landing Page'] and r['Ranking Status']=='Not ranking'), 'Optimise existing pages', 'Medium', C['BL']),
-        ('Business Relevant Gaps',   bgap, sum(r['Volume'] for r in mapped if not r['Landing Page'] and rel_map.get(r['Keyword'],'') in ('RELEVANT','BORDERLINE')), 'Create new content', 'Medium', C['PU']),
+        ('Business Relevant Gaps',   bgap, sum(r['Volume'] for r in mapped if not r['Landing Page'] and rel_map.get(r['Keyword'].lower(),'') in ('RELEVANT','BORDERLINE')), 'Create new content', 'Medium', C['PU']),
         ('Already Ranking Well',     conf, sum(r['Volume'] for r in mapped if r['Landing Page'] and r['Ranking Status']=='Ranking p1-10'), 'Monitor only', 'Low', C['GY']),
     ]
     for i, (opp,cnt,vol,act,pri,color) in enumerate(summary_rows):
@@ -2356,7 +2356,7 @@ def build_excel(gsc_df, mapped, rel_map, clusters, url_clusters, taxonomy=None):
             )
 
         # Group-level action
-        rel_any = any(rel_map.get(r['Keyword'],'') in ('RELEVANT','BORDERLINE') for r in rows)
+        rel_any = any(rel_map.get(r['Keyword'].lower(),'') in ('RELEVANT','BORDERLINE') for r in rows)
         first_r = rows[0]
         group_action_opp, group_action_act = get_group_action(
             {**first_r, 'Landing Page': url_for_cluster,
@@ -2633,7 +2633,7 @@ if st.button("🚀 Run Full Analysis", disabled=bool(issues), use_container_widt
         st.markdown("---"); st.subheader("📊 Analysis Complete")
         mapped_kw = sum(1 for r in mapped if r['Landing Page'])
         qw        = sum(1 for r in mapped if r['Ranking Status'] == 'Quick win p11-20')
-        bgaps     = sum(1 for r in mapped if not r['Landing Page'] and rel_map.get(r['Keyword'],'') in ('RELEVANT','BORDERLINE'))
+        bgaps     = sum(1 for r in mapped if not r['Landing Page'] and rel_map.get(r['Keyword'].lower(),'') in ('RELEVANT','BORDERLINE'))
         themes    = len(set(r.get('Theme','') for r in mapped if r.get('Theme','')))
         n_cl      = len(clusters)
         conf_gsc  = len(gsc_val[gsc_val['Mapping Status']=='Confirmed'])
@@ -2664,8 +2664,8 @@ if st.button("🚀 Run Full Analysis", disabled=bool(issues), use_container_widt
         with t4:
             gp = pd.DataFrame([{'Theme':r.get('Theme',''),'Sub-theme':r.get('Sub-theme',''),
                                   'Keyword':r['Keyword'],'Volume':r['Volume'],'Intent':r['Intent'],
-                                  'Relevance':rel_map.get(r['Keyword'],'')} for r in mapped
-                                 if not r['Landing Page'] and rel_map.get(r['Keyword'],'') in ('RELEVANT','BORDERLINE')]).sort_values(['Theme','Volume'], ascending=[True,False])
+                                  'Relevance':rel_map.get(r['Keyword'].lower(),'')} for r in mapped
+                                 if not r['Landing Page'] and rel_map.get(r['Keyword'].lower(),'') in ('RELEVANT','BORDERLINE')]).sort_values(['Theme','Volume'], ascending=[True,False])
             st.dataframe(gp.head(300), use_container_width=True, height=350)
 
         st.markdown("---")
