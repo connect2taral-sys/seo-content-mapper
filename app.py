@@ -867,10 +867,12 @@ Return ONLY valid JSON: {{"keyword": "Informational" or "Transactional", ...}}
 Keywords: {json.dumps(batch)}"""
 
     def parse_result(r, batch):
+        # Normalise Claude's response keys to lowercase before lookup
+        r_lower = {k.lower(): v for k, v in r.items()} if isinstance(r, dict) else {}
         out = {}
         for kw in batch:
-            v = r.get(kw, '')
-            out[kw] = v if v in ('Informational','Transactional') else 'Transactional'
+            v = r_lower.get(kw.lower(), '')
+            out[kw.lower()] = v if v in ('Informational','Transactional') else 'Transactional'
         return out
 
     return run_batches(
@@ -897,7 +899,7 @@ Keywords: {json.dumps(batch)}"""
         api_key, batches,
         make_prompt=make_prompt,
         parse_result=lambda r, b: ({k.lower(): v for k, v in r.items()} if isinstance(r, dict) else {k.lower(): 'BORDERLINE' for k in b}),
-        fallback_fn=lambda b: {k: 'BORDERLINE' for k in b},
+        fallback_fn=lambda b: {k.lower(): 'BORDERLINE' for k in b},
         status_prefix="Claude — business relevance",
         status_text=status_text, progress_bar=progress_bar, p0=p0, p1=p1,
         max_tokens=1200, timeout=45
