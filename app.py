@@ -943,7 +943,12 @@ Keywords: {json.dumps(kw_list)}"""
         for attempt in range(3):
             try:
                 result = call_claude(api_key, prompt, 3000, 55)
-                if isinstance(result, list): out.extend(result)
+                if isinstance(result, list):
+                    out.extend(result)
+                elif isinstance(result, dict):
+                    for key in ('clusters','groups','results','data'):
+                        if key in result and isinstance(result[key], list):
+                            out.extend(result[key]); break
                 break
             except Exception:
                 if attempt < 2: time.sleep(3)
@@ -1849,6 +1854,7 @@ def extract_location(kw):
         'plumber','electrician','technician','professional','emergency',
         'maintenance','replacement','near','local','best','top','cheap',
         'affordable','licensed','certified','residential','commercial',
+        'air','hot','cold','warm','cool','wet','dry','raw',
     }
 
     SERVICE_WORDS = {
@@ -1962,7 +1968,7 @@ def extract_location(kw):
                 continue
             if w in SERVICE_WORDS or w in NOT_LOC or w in COMMON_ENGLISH:
                 break
-            if len(w) >= 3 and w.isalpha():
+            if len(w) >= 4 and w.isalpha():  # 4+ chars — 'air','hot' are not cities
                 tail.insert(0, w)
             else:
                 break
@@ -2379,12 +2385,22 @@ def build_excel(gsc_df, mapped, rel_map, clusters, url_clusters, taxonomy=None):
                 'Confirmed' if 'GSC' in src_txt else 'Medium'
             )
 
-        # Group-level action
+        # Group-level action — majority vote across all keywords
         rel_any = any(rel_map.get(r['Keyword'].lower(),'') in ('RELEVANT','BORDERLINE') for r in rows)
+        info_vol  = sum(r.get('Volume',0) for r in rows if r.get('Intent')=='Informational')
+        trans_vol = sum(r.get('Volume',0) for r in rows if r.get('Intent')=='Transactional')
+        cluster_intent = 'Informational' if info_vol > trans_vol else 'Transactional'
+        cluster_gtype  = next((r.get('_group_type','') for r in rows if r.get('_group_type','')), '')
+        if not cluster_gtype:
+            cluster_gtype = 'Blog post' if cluster_intent=='Informational' else 'Service page'
         first_r = rows[0]
         group_action_opp, group_action_act = get_group_action(
-            {**first_r, 'Landing Page': url_for_cluster,
-             '_is_loc_group': any(r.get('_is_loc_group') for r in rows)},
+            {**first_r,
+             'Intent': cluster_intent,
+             'Landing Page': url_for_cluster,
+             '_group_type': cluster_gtype,
+             '_is_loc_group': (any(r.get('_is_loc_group') for r in rows)
+                               and cluster_intent == 'Transactional')},
             'RELEVANT' if rel_any else 'BORDERLINE'
         )
 
@@ -2404,9 +2420,10 @@ def build_excel(gsc_df, mapped, rel_map, clusters, url_clusters, taxonomy=None):
         total_vol   = sum(r.get('Volume',0) for r in rows)
         theme       = first_r.get('Theme','')
         subtheme    = first_r.get('Sub-theme','')
-        gtype       = first_r.get('_group_type','')
-        content_type = ('Blog post' if 'Blog' in gtype else
-                        'Location page' if any(r.get('_is_loc_group') for r in rows) else
+        gtype       = cluster_gtype
+        content_type = ('Blog post' if cluster_intent == 'Informational' or 'Blog' in cluster_gtype else
+                        'Location page' if (any(r.get('_is_loc_group') for r in rows)
+                                            and cluster_intent == 'Transactional') else
                         'Service page')
 
         cluster_items.append({
