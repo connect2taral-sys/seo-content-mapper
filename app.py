@@ -838,7 +838,7 @@ def claude_intent(api_key, keywords, biz_desc, status_text, progress_bar, p0, p1
     Context-aware: understands that some keywords without question words
     are still informational (e.g. "ac unit common problems", "furnace lifespan").
     """
-    batches = [keywords[i:i+120] for i in range(0, len(keywords), 120)]
+    batches = [keywords[i:i+200] for i in range(0, len(keywords), 200)]
     def make_prompt(batch):
         return f"""You are an expert SEO analyst. Classify each keyword as either
 "Informational" or "Transactional" based on what a real searcher wants.
@@ -885,7 +885,7 @@ Keywords: {json.dumps(batch)}"""
 
 
 def claude_relevance(api_key, keywords, biz_desc, excl_str, status_text, progress_bar, p0, p1):
-    batches = [keywords[i:i+100] for i in range(0, len(keywords), 100)]
+    batches = [keywords[i:i+150] for i in range(0, len(keywords), 150)]
     excl_note = f"\nServices NOT offered: {excl_str}" if excl_str.strip() else ""
     def make_prompt(batch):
         return f"""SEO analyst. Classify each keyword relevance for this business.
@@ -904,7 +904,7 @@ Keywords: {json.dumps(batch)}"""
     )
 
 def claude_cluster(api_key, keywords_with_vol, content_type, status_text, progress_bar, p0, p1):
-    batches = [keywords_with_vol[i:i+100] for i in range(0, len(keywords_with_vol), 100)]
+    batches = [keywords_with_vol[i:i+150] for i in range(0, len(keywords_with_vol), 150)]
     out = []
     total = len(batches)
     for bi, batch in enumerate(batches):
@@ -1169,7 +1169,7 @@ def claude_validate_match(api_key, kw_candidates, biz_desc,
     Medium: page covers the parent topic, keyword is a natural subtopic
     null:   no genuine match — even if TF-IDF score was high
     """
-    batches = [kw_candidates[i:i+50] for i in range(0, len(kw_candidates), 50)]
+    batches = [kw_candidates[i:i+80] for i in range(0, len(kw_candidates), 80)]
 
     def make_prompt(batch):
         items = []
@@ -1306,7 +1306,7 @@ def phase2_map(sem_df, url_df, gsc_dedup, gsc_val_df, weights, threshold,
     progress_bar.progress(38)
 
     # ── Step A: TF-IDF shortlist ─────────────────────────────────────────
-    SHORTLIST_THRESHOLD = 0.10   # low — Claude decides quality not score
+    SHORTLIST_THRESHOLD = 0.20   # only real TF-IDF matches go to Claude
     MAX_CANDIDATES      = 3      # top N per keyword
 
     status_text.text("Phase 2: Building candidate shortlists...")
@@ -2564,6 +2564,20 @@ if st.button("🚀 Run Full Analysis", disabled=bool(issues), use_container_widt
     status_text  = st.empty()
     t_start      = time.time()
 
+    # Keep-alive: ping UI every 25s so Streamlit Cloud doesn't timeout
+    # Streamlit Cloud kills sessions after 60s of no UI updates
+    import threading
+    _stop_keepalive = threading.Event()
+    def _keepalive():
+        while not _stop_keepalive.wait(25):
+            try:
+                elapsed = round(time.time() - t_start)
+                status_text.text(f"Running... {elapsed//60}m {elapsed%60}s elapsed — please wait")
+            except Exception:
+                break
+    _ka_thread = threading.Thread(target=_keepalive, daemon=True)
+    _ka_thread.start()
+
     try:
         def phase_run(label, fn):
             """Run a phase and surface any error immediately with the phase name."""
@@ -2666,6 +2680,7 @@ if st.button("🚀 Run Full Analysis", disabled=bool(issues), use_container_widt
         excel_buf = build_excel(gsc_val, mapped, rel_map, clusters, url_clusters, taxonomy)
         progress_bar.progress(100)
         elapsed = round(time.time() - t_start)
+        _stop_keepalive.set()
         status_text.text(f"✅ Done in {elapsed//60}m {elapsed%60}s")
 
         # Metrics
@@ -2715,6 +2730,7 @@ if st.button("🚀 Run Full Analysis", disabled=bool(issues), use_container_widt
         st.markdown('<div class="info-box"><strong>6 tabs:</strong> GSC Mapping Quality | Keyword Mapping | Opportunity Classification | Keyword Clusters | Business Relevant Gaps | Priority Roadmap — all sorted by Theme → Sub-theme</div>', unsafe_allow_html=True)
 
     except Exception as e:
+        _stop_keepalive.set()
         elapsed = round(time.time() - t_start)
         progress_bar.progress(0)
         st.markdown(f'<div class="error-box">❌ Error after {elapsed}s: {str(e)}</div>', unsafe_allow_html=True)
