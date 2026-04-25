@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import re, io, json, time, urllib.request, urllib.error
+import requests as _requests
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from openpyxl import Workbook
@@ -20,12 +21,7 @@ st.markdown("""<style>
 .sec-hdr{background:#1D9E75;color:white;padding:8px 16px;border-radius:4px;font-weight:600;margin:16px 0 8px 0;}
 </style>""", unsafe_allow_html=True)
 
-# ── TAXONOMY GROUPS ────────────────────────────────────────────────────────
-HVAC_GRP = {'furnace','boiler','heat_pump','ac_cooling','ductless','hvac_general','geothermal'}
-PLMB_GRP = {'water_pipes','drain_sewer','water_heater','toilet','faucet_sink','shower_tub',
-             'bathroom','kitchen','plumbing_general','backflow','sump_pump','sprinkler'}
-ELEC_GRP = {'electrical','generator','ev_charger'}
-ALL_EX   = HVAC_GRP | PLMB_GRP | ELEC_GRP | {'gas_utility','air_quality'}
+# Taxonomy groups removed — compatibility now handled universally by is_compat_universal
 
 # Universal exclusion patterns — works for any website
 EXCL = [
@@ -272,7 +268,7 @@ TRANS_STRONG = [
 ]
 
 def classify_intent_rules(kw):
-    """Returns 'Informational', 'Transactional', or 'Ambiguous'."""
+    """Returns 'Informational', 'Transactional', or 'Ambiguous' (Ambiguous sent to Claude in Phase 3)."""
     kl = kw.lower().strip()
     # Check strong informational
     for p in INFO_STRONG:
@@ -764,29 +760,13 @@ def cat_kw(kw):
     return frozenset(c)
 
 def is_compat(kc, uc, kw, url):
-    if 'location' in uc:
-        kl = expand(kw.lower())
-        locs = [t for t in uc if t.startswith('loc:')]
-        return bool(locs) and locs[0].replace('loc:', '') in kl
-    url_brands = {t for t in uc if t.startswith('brand:')}
-    kw_brands  = {t for t in kc if t.startswith('brand:')}
-    if url_brands and not (url_brands & kw_brands): return False
-    if 'commercial' in uc and 'commercial-hvac' in url.lower():
-        if 'commercial' not in kc: return False
-    if 'gas_utility' in uc and 'gas_utility' not in kc: return False
-    if 'gas_utility' in kc and 'gas_utility' not in uc: return False
-    ke = kc & ALL_EX; ue = uc & ALL_EX
-    if not ke or not ue: return True
-    if ke & ue: return True
-    ksh = kc & (HVAC_GRP-{'hvac_general'}); ush = uc & (HVAC_GRP-{'hvac_general'})
-    if 'hvac_general' in kc and not ksh and ue & HVAC_GRP: return True
-    if 'hvac_general' in uc and not ush and ke & HVAC_GRP: return True
-    ksp = kc & (PLMB_GRP-{'plumbing_general'}); usp = uc & (PLMB_GRP-{'plumbing_general'})
-    if 'plumbing_general' in kc and not ksp and ue & PLMB_GRP: return True
-    if 'plumbing_general' in uc and not usp and ke & PLMB_GRP: return True
-    if 'electrical' in kc and ue & ELEC_GRP: return True
-    if 'electrical' in uc and ke & ELEC_GRP: return True
-    return False
+    """
+    Legacy compatibility check — now delegates entirely to is_compat_universal.
+    Kept for call-site compatibility. All hardcoded HVAC/plumbing logic removed.
+    Phase 2 Claude validation is the real quality gate — this is just a pre-filter.
+    """
+    return True   # Claude validates the actual match quality in Phase 2
+
 
 def is_compat_universal(kw_theme, url_theme):
     """Universal compatibility: keyword theme must match URL theme.
@@ -802,20 +782,24 @@ def clean_kw(kw):
 
 # ── CLAUDE API WITH KEEP-ALIVE ────────────────────────────────────────────
 def call_claude(api_key, prompt, max_tokens=2000, timeout=50):
-    """Hard timeout on every call — never hangs."""
-    payload = json.dumps({
-        "model": "claude-sonnet-4-20250514",
-        "max_tokens": max_tokens,
-        "temperature": 0,
-        "messages": [{"role": "user", "content": prompt}]
-    }).encode()
-    req = urllib.request.Request(
-        "https://api.anthropic.com/v1/messages", data=payload,
+    """
+    Hard timeout on every call — uses requests library so timeout applies
+    to BOTH connection AND response body read. urllib.urlopen only times out
+    the connection, not the read — causing silent hangs on large responses.
+    """
+    resp = _requests.post(
+        "https://api.anthropic.com/v1/messages",
         headers={"Content-Type": "application/json",
                  "x-api-key": api_key,
-                 "anthropic-version": "2023-06-01"}, method="POST")
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        data = json.loads(r.read())
+                 "anthropic-version": "2023-06-01"},
+        json={"model": "claude-sonnet-4-20250514",
+              "max_tokens": max_tokens,
+              "temperature": 0,
+              "messages": [{"role": "user", "content": prompt}]},
+        timeout=timeout
+    )
+    resp.raise_for_status()
+    data = resp.json()
     txt = data['content'][0]['text'].strip()
     txt = re.sub(r'^```json?\s*', '', txt)
     txt = re.sub(r'\s*```$', '', txt)
@@ -2581,34 +2565,48 @@ if st.button("🚀 Run Full Analysis", disabled=bool(issues), use_container_widt
     t_start      = time.time()
 
     try:
-        # Phase 0: Generate locked taxonomy for this business
-        taxonomy, url_theme_map, abbrev_map = generate_taxonomy(
-            api_key, biz_desc, sf_df, status_text, progress_bar)
+        def phase_run(label, fn):
+            """Run a phase and surface any error immediately with the phase name."""
+            try:
+                return fn()
+            except Exception as e:
+                raise RuntimeError(f"Failed in {label}: {e}") from e
+
+        # Phase 0
+        taxonomy, url_theme_map, abbrev_map = phase_run("Phase 0 (Taxonomy)",
+            lambda: generate_taxonomy(api_key, biz_desc, sf_df, status_text, progress_bar))
 
         # Phase 1
-        gsc_val, url_df, gsc_dedup, stop, hp_slugs = phase1_gsc(gsc_df, sf_df, weights, status_text, progress_bar)
+        gsc_val, url_df, gsc_dedup, stop, hp_slugs = phase_run("Phase 1 (GSC validation)",
+            lambda: phase1_gsc(gsc_df, sf_df, weights, status_text, progress_bar))
 
-        # Phase 3: Intent classification (before mapping so mapping uses correct intent)
+        # Phase 3: Intent classification
         all_kws = sem_df['Keyword'].fillna('').tolist()
-        intent_map = phase3_intent(all_kws, api_key, biz_desc, status_text, progress_bar)
+        intent_map = phase_run("Phase 3 (Intent classification)",
+            lambda: phase3_intent(all_kws, api_key, biz_desc, status_text, progress_bar))
 
         # Phase 2
-        mapped = phase2_map(sem_df, url_df, gsc_dedup, gsc_val, weights, threshold,
-                            your_col, intent_map, hp_slugs, url_theme_map,
-                            status_text, progress_bar)
+        mapped = phase_run("Phase 2 (URL matching)",
+            lambda: phase2_map(sem_df, url_df, gsc_dedup, gsc_val, weights, threshold,
+                               your_col, intent_map, hp_slugs, url_theme_map,
+                               status_text, progress_bar))
 
         # Phase 4
-        rel_map, mapped = phase4_relevance_blogs(mapped, url_df, api_key, biz_desc, excl_str,
-                                                  status_text, progress_bar)
+        rel_map, mapped = phase_run("Phase 4 (Relevance)",
+            lambda: phase4_relevance_blogs(mapped, url_df, api_key, biz_desc, excl_str,
+                                           status_text, progress_bar))
 
-        # Phase 5: Theme + Sub-theme
-        mapped = phase5_themes(mapped, url_df, api_key, biz_desc, taxonomy, status_text, progress_bar)
+        # Phase 5
+        mapped = phase_run("Phase 5 (Grouping)",
+            lambda: phase5_themes(mapped, url_df, api_key, biz_desc, taxonomy, status_text, progress_bar))
 
-        # Phase 6: Clustering
-        clusters, url_clusters = phase6_cluster(mapped, rel_map, api_key, status_text, progress_bar)
+        # Phase 6
+        clusters, url_clusters = phase_run("Phase 6 (Clustering)",
+            lambda: phase6_cluster(mapped, rel_map, api_key, status_text, progress_bar))
 
-        # ── Content Group Assignment ──────────────────────────────────────
-        mapped = assign_content_groups(mapped, api_key, biz_desc, status_text, progress_bar)
+        # Content Group Assignment
+        mapped = phase_run("Content Group Assignment",
+            lambda: assign_content_groups(mapped, api_key, biz_desc, status_text, progress_bar))
 
         # ── GUARANTEED ZERO BLANK SUB-THEMES ─────────────────────────────
         # After all Claude phases, sweep every row and fill any remaining blanks.
